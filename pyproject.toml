@@ -34,4 +34,5 @@ packages = ["src/sn2docx"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-addopts = "-ra"
+# no .pytest_cache folder in the project root
+addopts = "-ra -p no:cacheprovider"
