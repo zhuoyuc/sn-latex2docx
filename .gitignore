@@ -1,41 +1,67 @@
-# Python
+# --- Python -----------------------------------------------------------------
 __pycache__/
 *.py[cod]
+*$py.class
 *.egg-info/
 .eggs/
 build/
 dist/
+pip-wheel-metadata/
 
-# Environments (uv)
+# --- Environments (uv) ------------------------------------------------------
 .venv/
 venv/
+.env
+.env.*
 
-# Tooling caches
+# --- Test / lint / type-check caches ----------------------------------------
 .pytest_cache/
 .ruff_cache/
 .mypy_cache/
+.pyright/
+.tox/
+.nox/
 .coverage
+.coverage.*
+coverage.xml
 htmlcov/
 
-# Conversion output and scratch
+# --- Conversion output --------------------------------------------------------
 output/
+# a .docx written next to its source by `sn2docx main.tex`
+examples/**/*.docx
+templates/**/*.docx
+tests/fixtures/**/*.docx
 *.tmp
-~$*.docx
 
-# LaTeX build artefacts
+# --- Microsoft Office ------------------------------------------------------------
+~$*
+*.~tmp
+
+# --- LaTeX build artefacts (when compiling the example manuscripts) ------------
 *.aux
 *.bbl
+*.bcf
 *.blg
-*.log
-*.out
-*.toc
-*.synctex.gz
+*.dvi
 *.fdb_latexmk
 *.fls
+*.lof
+*.lot
+*.log
+*.out
+*.run.xml
+*.synctex.gz
+*.synctex(busy)
+*.toc
+*.xdv
 *-eps-converted-to.pdf
 
-# OS / editors
+# --- OS / editors ------------------------------------------------------------------
 .DS_Store
 Thumbs.db
+desktop.ini
+*.swp
+*~
 .vscode/
 .idea/

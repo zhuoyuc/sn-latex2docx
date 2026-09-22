@@ -92,9 +92,9 @@ src/sn2docx/
               preprocess.py (orchestration)
   docx/       package.py (zip parts) · ooxml.py (element builders) · postprocess.py · verify.py
   resources/  template.docx (house Word template) · csl/numeric.csl · csl/author-year.csl
-templates/springer-nature/   the official sn-jnl LaTeX template (class, bst files, manual)
+templates/springer-nature/   the official sn-jnl LaTeX template (class, bst files, manual);
+                             its sn-article.tex is also a test manuscript
 examples/
-  sn-sample/                 Springer Nature's sample article (sn-article.tex)
   reference-manuscript/      the Word template's own content written as an sn-jnl manuscript
 tests/                       unit tests, end-to-end tests, edge-case fixture
 scripts/word_check.py        Word-based field verification and PDF/PNG rendering

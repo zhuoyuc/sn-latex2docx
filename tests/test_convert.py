@@ -30,7 +30,7 @@ def reference(out_dir):
 
 @pytest.fixture(scope="session")
 def sample(out_dir):
-    return convert(ROOT / "examples/sn-sample/sn-article.tex", out_dir / "sn-article.docx")
+    return convert(ROOT / "templates/springer-nature/sn-article.tex", out_dir / "sn-article.docx")
 
 
 @pytest.fixture(scope="session")
