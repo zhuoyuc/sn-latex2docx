@@ -9,6 +9,8 @@
 \DeclareMathOperator{\diag}{diag}
 \newtheorem{lemma}{Lemma}
 \newtheorem{corollary}[lemma]{Corollary}
+\theoremstyle{thmstylethree}
+\newtheorem{defn}{Definition}[section]
 
 \begin{document}
 \title{Edge cases for the \LaTeX\ to Word converter}
@@ -67,6 +69,61 @@ A footnote\footnote{Footnote pointing to Section~\ref{sec:macros}.} here.
 \end{algorithmic}
 \end{algorithm}
 Line~\ref{line:for} of Algorithm~\ref{alg:loop}. Cite \citet{lamport94} and \citep{knuth84,lamport94}.
+Notes: \citep[see][p.~5]{knuth84}; author only: \citeauthor{lamport94}; year only: \citeyear{knuth84}.
+
+\begin{algorithmic}
+\If{$x$}
+  \State nested
+\EndIf
+\end{algorithmic}
+
+\section{Regressions}
+\begin{defn}[Charge]\label{def:charge}
+Ions such as \ce{Na+}, \ce{Ca2+} and \ce{Cs_xFA_{1-x}PbI3}.
+\end{defn}
+See Definition~\ref{def:charge}.
+\begin{align}
+  u &= v \label{eq:one}
+\end{align}
+Text before a skip\vskip 6pt plus 2pt and after it. A line ending in a comment % comment
+
+starts a new paragraph here.
+
+\begin{figure}
+  \subfloat{\includegraphics{missing-image}\label{fig:nocap}}
+  \caption{No sub-caption.}
+\end{figure}
+Panel~\ref{fig:nocap}.
+
+\begin{table}
+\caption{Partial rules}\label{tab:rules}
+\begin{tabular}{lcc}
+\toprule
+ & \multicolumn{2}{c}{Group} \\
+\cmidrule(lr){2-3}
+Name & A & B \\
+\midrule
+x & 1 & 2 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+\begin{longtable}{ll}
+\caption{Long table}\label{tab:long}\\
+\toprule
+Key & Value \\
+\midrule
+\endfirsthead
+Key (cont.) & Value \\
+\midrule
+\endhead
+\multicolumn{2}{r}{Continued on next page} \\
+\endfoot
+\bottomrule
+\endlastfoot
+a & 1 \\
+b & 2 \\
+\end{longtable}
 
 \begin{thebibliography}{2}
 \bibitem[{Knuth(1984)}]{knuth84} D. E. Knuth. \newblock \emph{The {\TeX}book}. \newblock Addison-Wesley, 1984.

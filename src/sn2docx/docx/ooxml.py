@@ -190,17 +190,24 @@ def content_children(p: etree._Element) -> list[etree._Element]:
 
 
 def strip_leading_space(items: list[etree._Element]) -> list[etree._Element]:
-    """Drop leading whitespace-only runs and left-strip the first text run."""
+    """Drop leading whitespace-only runs and left-strip the first text run.
+
+    Bookmarks and inline markers are zero-width, so they are kept but looked past.
+    """
     out = list(items)
-    while out:
-        first = out[0]
+    i = 0
+    while i < len(out):
+        first = out[i]
+        if first.tag in (q("w:bookmarkStart"), q("w:bookmarkEnd"), MK):
+            i += 1
+            continue
         if first.tag == q("w:r"):
             t = first.find(q("w:t"))
             other = [c for c in first if c.tag not in (q("w:rPr"), q("w:t"))]
             if t is not None and not other:
                 stripped = (t.text or "").lstrip()
                 if not stripped:
-                    out.pop(0)
+                    out.pop(i)
                     continue
                 t.text = stripped
         break

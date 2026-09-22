@@ -8,7 +8,7 @@ import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
-from .docx.package import make_reference_doc
+from .docx.package import Package, make_reference_doc
 from .docx.postprocess import Options, postprocess
 from .latex.preprocess import preprocess
 from .pandoc import resource_path, run_pandoc
@@ -54,7 +54,8 @@ def convert(
         pre = preprocess(source)
         with tempfile.TemporaryDirectory(prefix="sn2docx-") as tmp:
             work = Path(tmp)
-            ref = make_reference_doc(template, work / "reference.docx")
+            tpl = Package.open(template)
+            ref = make_reference_doc(tpl, work / "reference.docx")
             raw = work / "pandoc.docx"
             run_pandoc(pre.pandoc_tex, pre.conversion, ref, raw, work, csl=csl)
             if keep_intermediate:
@@ -62,7 +63,7 @@ def convert(
                 shutil.copy(work / "pandoc-input.tex", keep_intermediate / "pandoc-input.tex")
                 shutil.copy(raw, keep_intermediate / "pandoc.docx")
             opts = Options(figure_width=figure_width, date=date)
-            postprocess(raw, output, pre.conversion, template, opts)
+            postprocess(raw, output, pre.conversion, tpl, opts)
     finally:
         root.removeHandler(handler)
     return Result(output, list(dict.fromkeys(warnings)), pre.conversion.citation_mode)

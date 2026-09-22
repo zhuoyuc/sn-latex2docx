@@ -174,11 +174,22 @@ def test_algorithmic_indentation_and_numbering():
 
 # --------------------------------------------------------------------- theorems
 def test_theorem_counters_shared():
-    envs, lines = parse_theorems(r"\newtheorem{theorem}{Theorem}\newtheorem{lemma}[theorem]{Lemma}\newtheorem*{rem}{Remark}")
-    assert envs["lemma"][0] == "theorem" and envs["rem"][0] is None
-    out, reg = walk(r"\begin{theorem}\label{t1}A\end{theorem}\begin{lemma}\label{l2}B\end{lemma}", envs)
+    envs = parse_theorems(r"\newtheorem{theorem}{Theorem}\newtheorem{lemma}[theorem]{Lemma}\newtheorem*{rem}{Remark}")
+    assert envs["lemma"].counter == "theorem" and envs["rem"].counter is None
+    out, reg = walk(r"\begin{theorem}\label{t1}A\end{theorem}\begin{lemma}[Key]\label{l2}B\end{lemma}"
+                    r"\begin{rem}C\end{rem}", envs)
     assert reg.labels["t1"].text == "1" and reg.labels["l2"].text == "2"
-    assert out.count("@@ANCHOR") == 2
+    assert [t.head for t in reg.theorems] == ["Theorem 1", "Lemma 2", "Remark"]
+    assert reg.theorems[1].has_note and out.count("@@ANCHOR") == 2
+
+
+def test_theorem_numbered_within_section():
+    envs = parse_theorems(r"\theoremstyle{thmstylethree}\newtheorem{defn}{Definition}[section]")
+    assert envs["defn"].style == "definition" and envs["defn"].within == 1
+    _, reg = walk(r"\section{A}\begin{defn}x\end{defn}\section{B}\begin{defn}\label{d}y\end{defn}"
+                  r"\begin{defn}z\end{defn}", envs)
+    assert [t.head for t in reg.theorems] == ["Definition 1.1", "Definition 2.1", "Definition 2.2"]
+    assert reg.labels["d"].text == "2.1"
 
 
 # ------------------------------------------------------------------ references

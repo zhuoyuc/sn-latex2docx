@@ -7,7 +7,7 @@ import re
 from dataclasses import dataclass
 from pathlib import Path
 
-from ..model import Conversion, Heading, Registry, marker
+from ..model import Conversion, Heading, Registry, TheoremSpec, marker
 from .extras import map_math_aware, read_bib_authors, rewrite_packages, rewrite_textual_citations
 from .frontmatter import extract_frontmatter
 from .scan import (
@@ -28,7 +28,12 @@ log = logging.getLogger(__name__)
 _AUTHOR_YEAR_OPTIONS = {"sn-mathphys-ay", "sn-vancouver-ay", "sn-apa", "sn-basic", "sn-chicago"}
 _NUMERIC_OPTIONS = {"sn-mathphys-num", "sn-vancouver-num", "sn-aps", "sn-nature", "Numbered"}
 
-_THEOREM_STYLES = {"thmstyleone": "plain", "thmstyletwo": "plain", "thmstylethree": "definition"}
+# \theoremstyle names -> head/body formatting used for the theorem heads we write
+_THEOREM_STYLES = {
+    "plain": "plain", "definition": "definition", "remark": "remark",
+    "thmstyleone": "plain", "thmstyletwo": "roman-head", "thmstylethree": "definition",
+}
+_WITHIN_DEPTH = {"section": 1, "subsection": 2, "subsubsection": 3}
 
 # Body commands rewritten in one pass before pandoc sees the text: layout commands
 # are dropped; \footnotemark/\footnotetext pairs outside tables keep the text as a footnote.
@@ -37,7 +42,7 @@ _BODY_COMMANDS = {
         ("maketitle", ""), ("backmatter", ""), ("frontmatter", ""), ("mainmatter", ""), ("raggedbottom", ""),
         ("bigskip", ""), ("medskip", ""), ("smallskip", ""), ("noindent", ""), ("clearpage", ""),
         ("cleardoublepage", ""), ("newpage", ""), ("pagebreak", "o"), ("nopagebreak", "o"), ("FloatBarrier", ""),
-        ("unskip", ""), ("centering", ""), ("lstset", "m"), ("vspace", "sm"), ("vskip", ""), ("linenumbers", ""),
+        ("unskip", ""), ("centering", ""), ("lstset", "m"), ("vspace", "sm"), ("hspace", "sm"), ("linenumbers", ""),
         ("nolinenumbers", ""), ("bibliographystyle", "m"), ("printbibliography", "o"), ("tableofcontents", ""),
         ("hypersetup", "m"), ("graphicspath", "m"), ("setcounter", "mm"), ("addtocounter", "mm"),
         ("footnotemark", "o"),
@@ -46,42 +51,47 @@ _BODY_COMMANDS = {
 }
 
 
+# \vskip/\hskip/\kern take a TeX dimension (with optional stretch), not a braced argument
+_SKIP_RE = re.compile(
+    r"\\(?:vskip|hskip|kern)(?![A-Za-z@])\s*[-+]?\s*(?:[0-9.]+\s*(?:[a-z]{2}|\\[A-Za-z@]+)|\\[A-Za-z@]+)"
+    r"(?:\s*(?:plus|minus)\s*[-+]?\s*[0-9.]+\s*(?:fill+|[a-z]{2}|\\[A-Za-z@]+))*"
+)
+
+
 @dataclass
 class PreprocessResult:
     pandoc_tex: str
     conversion: Conversion
 
 
-def parse_theorems(preamble: str) -> tuple[dict[str, tuple[str | None, str]], list[str]]:
-    """Return env -> (counter, title) and the pandoc preamble lines for theorems.
+def parse_theorems(preamble: str) -> dict[str, TheoremSpec]:
+    """Theorem-like environments declared with ``\\newtheorem`` (amsthm/ntheorem syntax).
 
     pandoc knows amsthm's ``proof`` environment natively, so it needs no entry.
     """
-    envs: dict[str, tuple[str | None, str]] = {}
-    lines: list[str] = []
-    pat = re.compile(r"\\(newtheorem\*?|theoremstyle|declaretheorem)(?![A-Za-z@])")
+    envs: dict[str, TheoremSpec] = {}
+    style = "plain"
+    pat = re.compile(r"\\(newtheorem\*?|theoremstyle)(?![A-Za-z@])")
     for m in pat.finditer(preamble):
         if is_escaped(preamble, m.start()):
             continue
         cmd = m.group(1)
         if cmd == "theoremstyle":
             args, _ = parse_command_args(preamble, m.end(), "m")
-            style = _THEOREM_STYLES.get((args[0] or "").strip(), (args[0] or "plain").strip())
-            if style not in ("plain", "definition", "remark"):
-                style = "plain"
-            lines.append(f"\\theoremstyle{{{style}}}")
+            style = _THEOREM_STYLES.get((args[0] or "").strip(), "plain")
         elif cmd == "newtheorem*":
             args, _ = parse_command_args(preamble, m.end(), "mm")
-            envs[(args[0] or "").strip()] = (None, args[1] or "")
-            lines.append(f"\\newtheorem*{{{args[0]}}}{{{args[1]}}}")
-        elif cmd == "newtheorem":
+            envs[(args[0] or "").strip()] = TheoremSpec(args[1] or "", None, style)
+        else:
             args, _ = parse_command_args(preamble, m.end(), "momo")
             name = (args[0] or "").strip()
-            shared = (args[1] or "").strip() or None
-            counter = envs[shared][0] if shared and shared in envs else (shared or name)
-            envs[name] = (counter, args[2] or "")
-            lines.append(f"\\newtheorem{{{name}}}" + (f"[{shared}]" if shared else "") + f"{{{args[2]}}}")
-    return envs, lines
+            shared = envs.get((args[1] or "").strip())
+            if shared is not None:  # \newtheorem{lemma}[theorem]{Lemma}: same counter and numbering
+                envs[name] = TheoremSpec(args[2] or "", shared.counter, style, shared.within)
+            else:
+                within = _WITHIN_DEPTH.get((args[3] or "").strip(), 0)
+                envs[name] = TheoremSpec(args[2] or "", name, style, within)
+    return envs
 
 
 def citation_mode(options: list[str], style: str | None) -> str:
@@ -160,12 +170,16 @@ _CITE_COMMANDS = ("cite", "citep", "citet", "citealp", "citealt", "citeauthor", 
 
 
 def _manual_citations(text: str, reg: Registry) -> str:
-    """Citations against a ``thebibliography`` list become CITE markers."""
+    """Citations against a ``thebibliography`` list become CITE markers.
+
+    natbib: one optional argument is a postnote, two are prenote and postnote.
+    """
 
     def handler(name: str):
         def fn(args: list[str | None]) -> str:
             keys = [k.strip() for k in (args[3] or "").split(",") if k.strip()]
-            reg.cites.append((name.lower(), keys))
+            pre, post = (args[1], args[2]) if args[2] is not None else (None, args[1])
+            reg.cites.append((name.lower(), keys, pre, post))
             return marker("CITE", len(reg.cites) - 1)
 
         return "soom", fn
@@ -213,14 +227,13 @@ def preprocess(path: Path) -> PreprocessResult:
         body = map_nonverbatim(body, lambda s: rewrite_textual_citations(s, authors))
         front.abstract = rewrite_textual_citations(front.abstract, authors)
 
-    theorems, theorem_lines = parse_theorems(preamble)
-    body = Transformer(reg, theorems).walk(body)
+    body = Transformer(reg, parse_theorems(preamble)).walk(body)
 
     body = _replace_refs(body, reg)
     if manual:
         body = map_nonverbatim(body, lambda s: _manual_citations(s, reg))
         front.abstract = _manual_citations(front.abstract, reg)
-    body = map_nonverbatim(body, lambda s: replace_commands(s, _BODY_COMMANDS))
+    body = map_nonverbatim(body, lambda s: _SKIP_RE.sub("", replace_commands(s, _BODY_COMMANDS)))
 
     if manual:
         reg.headings.append(Heading(1, False, False, ""))
@@ -246,7 +259,7 @@ def preprocess(path: Path) -> PreprocessResult:
     fm_parts.append(f"{marker('FMEND')}\n\n")
 
     math_ops = [preamble[s:e] for s, e, _ in find_commands(preamble, "DeclareMathOperator", spec="smm")]
-    pandoc_preamble = "\n".join(["\\documentclass{article}", *math_ops, *theorem_lines])
+    pandoc_preamble = "\n".join(["\\documentclass{article}", *math_ops])
     pandoc_tex = pandoc_preamble + "\n\\begin{document}\n" + "".join(fm_parts) + body + "\n\\end{document}\n"
 
     conv = Conversion(

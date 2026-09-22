@@ -22,6 +22,8 @@ from ..model import (
     Panel,
     Registry,
     Table,
+    Theorem,
+    TheoremSpec,
     marker,
 )
 from .extras import join_list
@@ -79,10 +81,9 @@ def _letters(n: int) -> str:
 
 
 class Transformer:
-    def __init__(self, registry: Registry, theorems: dict[str, tuple[str, str | None]] | None = None):
+    def __init__(self, registry: Registry, theorems: dict[str, TheoremSpec] | None = None):
         self.reg = registry
-        # theorem env name -> (counter name, display name); counter None => unnumbered
-        self.theorems = theorems or {}
+        self.theorems = theorems or {}  # environment name -> declaration
         self.theorem_counts: dict[str, int] = {}
         self.sec = [0, 0, 0]
         self.appendix = False
@@ -234,6 +235,10 @@ class Transformer:
             else:
                 parts = [str(n) for n in self.sec[:level]]
             number = ".".join(parts)
+            # counters numbered within this level (or a deeper one) restart
+            for spec in self.theorems.values():
+                if spec.counter and spec.within >= level:
+                    self.theorem_counts.pop(spec.counter, None)
         h = Heading(level, numbered, self.appendix, number)
         self.reg.headings.append(h)
         j = len(self.reg.headings) - 1
@@ -286,6 +291,8 @@ class Transformer:
             content = " \\\\ ".join(p[0] for p in parsed)
             if len(rows) > 1:
                 content = f"\\begin{{{env}}}{content}\\end{{{env}}}"
+            else:  # a single row needs no alignment, and "&" outside an aligned block breaks pandoc
+                content = strip_top_level(content)
             items.append((content, label, (not starred and not nonumber) or tag is not None, tag))
         else:
             content, label, nonumber, tag = parsed[0]
@@ -399,14 +406,20 @@ class Transformer:
 
     # ------------------------------------------------------------------ tables
     def _tabular(self, src: str) -> str:
-        """Sanitised tabular preceded by a TBLHDR marker; cell contents are walked."""
-        tab = sanitize_tabular(src)
+        """Sanitised tabular preceded by a TBLHDR marker; cell contents are walked.
+
+        Marker arguments: header row count, then ``row, first, last`` column triples for
+        every partial rule (``\\cmidrule``/``\\cline``) drawn under a row.
+        """
+        parts = _split_tabular(src)
+        if parts is None:
+            return src
+        _, spec, body = parts
+        rules = [n for triple in partial_rules(body) for n in triple]
+        tab = "\\begin{tabular}{" + clean_colspec(spec) + "}" + _clean_table_body(body) + "\\end{tabular}"
         body_start = _tabular_body_start(tab)
-        if body_start is None:
-            return tab
-        end = len(tab) - len("\\end{tabular}")
-        cells = self.walk(tab[body_start:end])
-        return f"{marker('TBLHDR', header_rows(tab))}\n\n{tab[:body_start]}{cells}\\end{{tabular}}"
+        cells = self.walk(tab[body_start : len(tab) - len("\\end{tabular}")])
+        return f"{marker('TBLHDR', header_rows(tab), *rules)}\n\n{tab[:body_start]}{cells}\\end{{tabular}}"
 
     def _table(self, body: str, longtable: bool = False) -> str:
         caption = None
@@ -428,7 +441,7 @@ class Transformer:
         if caption is not None:
             caption = _pop_labels(caption, labs)
         body_wo_caption = remove_command(body, "caption", "som")
-        _pop_labels(body_wo_caption, labs)
+        body_wo_caption = _pop_labels(body_wo_caption, labs)
         label = labs[0] if labs else None
 
         notes: list[tuple[str | None, str]] = []
@@ -509,12 +522,17 @@ class Transformer:
 
     # ---------------------------------------------------------------- theorems
     def _theorem(self, name: str, s: str, body_start: int, end: tuple[int, int]) -> str:
-        counter, _title = self.theorems[name]
+        spec = self.theorems[name]
         opt, after = read_optional(s, body_start)
         number = ""
-        if counter is not None:
-            self.theorem_counts[counter] = self.theorem_counts.get(counter, 0) + 1
-            number = str(self.theorem_counts[counter])
+        if spec.counter is not None:
+            self.theorem_counts[spec.counter] = self.theorem_counts.get(spec.counter, 0) + 1
+            number = str(self.theorem_counts[spec.counter])
+            if spec.within:
+                number = ".".join([*self._section_number(spec.within), number])
+        thm = Theorem(f"{spec.title} {number}".strip(), spec.style, has_note=bool(opt and opt.strip()))
+        self.reg.theorems.append(thm)
+        k = len(self.reg.theorems) - 1
         saved = self._target
 
         def target(label: str) -> str:
@@ -523,8 +541,12 @@ class Transformer:
         self._target = target
         inner = self.walk(s[after : end[0]])
         self._target = saved
-        head = f"\\begin{{{name}}}" + (f"[{opt}]" if opt is not None else "")
-        return f"{head}{inner}\\end{{{name}}}"
+        note = f"{marker('THMNOTE', k)} {self.walk(opt).strip()}\n\n" if thm.has_note else ""
+        return f"\n\n{marker('THM', k)}\n\n{note}{inner.strip()}\n\n{marker('THMEND', k)}\n\n"
+
+    def _section_number(self, depth: int) -> list[str]:
+        first = _letters(self.sec[0]) if self.appendix else str(self.sec[0])
+        return [first, *(str(n) for n in self.sec[1:depth])]
 
     # ---------------------------------------------------------------- listings
     def _listing(self, body: str) -> str:
@@ -616,21 +638,15 @@ def _enum_option(opt: str) -> str | None:
 
 
 def _longtable_heads(body: str) -> str:
-    """Keep the first header of a longtable, drop continuation heads/feet."""
-    if "\\endfirsthead" in body:
-        first, rest = body.split("\\endfirsthead", 1)
-        if "\\endhead" in rest:
-            rest = rest.split("\\endhead", 1)[1]
-        body = first + rest
-    else:
-        body = body.replace("\\endhead", "")
-    for marker_ in ("\\endfoot", "\\endlastfoot"):
-        if marker_ in body:
-            before, after = body.split(marker_, 1)
-            # the foot rows sit between the previous \end... marker and here; drop them
-            body = before[: before.rfind("\\\\") + 2] if "\\\\" in before else before
-            body += after
-    return body
+    """Keep the first header and the body of a longtable; drop continuation heads and feet.
+
+    Each ``\\endfirsthead``/``\\endhead``/``\\endfoot``/``\\endlastfoot`` ends the section
+    of rows written before it; the rows after the last such marker are the body.
+    """
+    pieces = re.split(r"\\(endfirsthead|endhead|endfoot|endlastfoot)(?![A-Za-z])", body)
+    sections = dict(zip(pieces[1::2], pieces[0::2]))  # marker -> the rows it closes
+    head = sections.get("endfirsthead", sections.get("endhead", ""))
+    return head + pieces[-1]
 
 
 # ------------------------------------------------------------------ tabulars
@@ -696,22 +712,47 @@ def header_rows(tabular: str) -> int:
     return sum(1 for r in split_top_level(body[: rule.start()]) if r.strip())
 
 
-def sanitize_tabular(src: str) -> str:
-    """Rewrite any tabular-like environment into a plain ``tabular`` pandoc can parse."""
+def _split_tabular(src: str) -> tuple[str, str, str] | None:
+    """``(environment, column spec, body)`` of a tabular-like environment."""
     m = re.match(r"\\begin\s*\{(tabular\*?|tabularx|tabulary)\}", src)
     if not m:
-        return src
+        return None
     name = m.group(1)
     i = m.end()
     if name in ("tabular*", "tabularx", "tabulary"):
         _, i = parse_command_args(src, i, "m")
     _, i = read_optional(src, i)
     args, i = parse_command_args(src, i, "m")
-    spec = clean_colspec(args[0] or "")
     end = re.search(r"\\end\s*\{" + re.escape(name) + r"\}\s*$", src)
-    body = src[i : end.start()] if end else src[i:]
-    body = _clean_table_body(body)
-    return "\\begin{tabular}{" + spec + "}" + body + "\\end{tabular}"
+    return name, args[0] or "", src[i : end.start()] if end else src[i:]
+
+
+def sanitize_tabular(src: str) -> str:
+    """Rewrite any tabular-like environment into a plain ``tabular`` pandoc can parse."""
+    parts = _split_tabular(src)
+    if parts is None:
+        return src
+    _, spec, body = parts
+    return "\\begin{tabular}{" + clean_colspec(spec) + "}" + _clean_table_body(body) + "\\end{tabular}"
+
+
+_PARTIAL_RULE_RE = re.compile(r"\\(?:cmidrule\s*(?:\([^)]*\))?\s*(?:\[[^\]]*\])?|cline)\s*\{\s*(\d+)\s*-\s*(\d+)\s*\}")
+_RULE_RE = re.compile(r"\\(?:toprule|midrule|bottomrule|botrule|hline|specialrule\s*\{[^}]*\}\s*\{[^}]*\}\s*\{[^}]*\})(?:\s*\[[^\]]*\])?")
+
+
+def partial_rules(body: str) -> list[tuple[int, int, int]]:
+    """``(row, first column, last column)`` for each partial rule, 0-based row, 1-based columns.
+
+    A rule written after row ``r``'s ``\\\\`` is drawn under row ``r``.
+    """
+    out: list[tuple[int, int, int]] = []
+    row = -1
+    for segment in split_top_level(body):
+        if row >= 0:
+            out += [(row, int(a), int(b)) for a, b in _PARTIAL_RULE_RE.findall(segment)]
+        if _RULE_RE.sub("", _PARTIAL_RULE_RE.sub("", segment)).strip():
+            row += 1
+    return out
 
 
 def _clean_table_body(body: str) -> str:

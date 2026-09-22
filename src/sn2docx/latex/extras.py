@@ -7,7 +7,10 @@ rewrite knows whether it sits in text or in math, because the output differs
 
 from __future__ import annotations
 
+import json
+import logging
 import re
+import subprocess
 from pathlib import Path
 
 from .scan import (
@@ -20,8 +23,9 @@ from .scan import (
     read_control_sequence,
     read_group,
     replace_commands,
-    skip_ws,
 )
+
+log = logging.getLogger(__name__)
 
 NNBSP = "\u202f"  # narrow no-break space: number-unit and unit-unit separator
 MINUS = "\u2212"
@@ -295,6 +299,18 @@ def siunitx_table(math: bool):
 _ARROWS = [("<=>", "\\rightleftharpoons"), ("<->", "\\leftrightarrow"), ("->", "\\rightarrow"), ("<-", "\\leftarrow")]
 
 
+_SCRIPT_TOKEN_RE = re.compile(r"[0-9]+[+-]?|[+-]|.")
+
+
+def _charge_ends(s: str, i: int) -> bool:
+    """``s[i]`` is a charge sign: + or - closing a species (end, space, bracket or arrow follows)."""
+    return i < len(s) and s[i] in "+-" and (i + 1 == len(s) or s[i + 1] in " )]}" or s.startswith("->", i))
+
+
+def _charge_sign(c: str) -> str:
+    return "{-}" if c == "-" else "+"
+
+
 def mhchem_to_math(formula: str) -> str:
     """Convert a (simple) mhchem formula to math: upright element symbols, real subscripts."""
     out: list[str] = []
@@ -328,11 +344,13 @@ def mhchem_to_math(formula: str) -> str:
             while j < len(s) and (s[j].isdigit() or s[j] == "."):
                 j += 1
             num = s[i:j]
-            if prev_is_species:
-                flush()
+            flush()
+            if prev_is_species and _charge_ends(s, j):  # Ca2+ -> Ca^{2+}
+                out.append(f"^{{{num}{_charge_sign(s[j])}}}")
+                j += 1
+            elif prev_is_species:
                 out.append(f"_{{{num}}}")
             else:
-                flush()
                 out.append(num + "\\,")
             i = j
             continue
@@ -343,14 +361,19 @@ def mhchem_to_math(formula: str) -> str:
                 body = g[0] if g else ""
                 i = g[1] if g else i + 2
             else:
-                m = re.match(r"[0-9]*[+-]?|.", s[i + 1 :])
+                m = _SCRIPT_TOKEN_RE.match(s, i + 1)
                 body = m.group(0) if m else ""
                 i += 1 + len(body)
             body = body.replace("-", "{-}") if c == "^" else body
             out.append(f"{c}{{{body}}}")
             prev_is_species = True
             continue
-        if c in "+" and (i + 1 >= len(s) or s[i + 1] == " "):
+        if c in "+-" and prev_is_species and _charge_ends(s, i):  # Na+ / I- : a charge, not an operator
+            flush()
+            out.append(f"^{{{_charge_sign(c)}}}")
+            i += 1
+            continue
+        if c == "+" and (i + 1 >= len(s) or s[i + 1] == " "):
             flush()
             out.append(" + ")
             prev_is_species = False
@@ -403,53 +426,27 @@ def rewrite_packages(body: str) -> str:
 
 # ------------------------------------------------------- textual numeric cites
 def read_bib_authors(files: list[Path]) -> dict[str, tuple[list[str], str]]:
-    """Map citation key -> (author/editor family names, year) using a light BibTeX reader."""
+    """Map citation key -> (author/editor family names, year).
+
+    The .bib files are parsed by pandoc (``-t csljson``), the same parser citeproc
+    uses for the bibliography, so names here always match the rendered entries.
+    """
+    from ..pandoc import pandoc_executable
+
     out: dict[str, tuple[list[str], str]] = {}
     for f in files:
-        try:
-            text = f.read_text(encoding="utf-8", errors="replace")
-        except OSError:
+        res = subprocess.run([pandoc_executable(), str(f), "-f", "bibtex", "-t", "csljson"],
+                             capture_output=True, text=True, encoding="utf-8")
+        if res.returncode != 0:
+            log.warning("could not read %s: %s", f, res.stderr.strip()[:200])
             continue
-        for m in re.finditer(r"@\s*(\w+)\s*(\{)\s*([^,\s]+)\s*,", text):
-            if m.group(1).lower() in ("string", "comment", "preamble"):
-                continue
-            group = read_group(text, m.start(2))
-            fields = _bib_fields(group[0] if group else text[m.end() :])
-            names = fields.get("author") or fields.get("editor") or ""
-            year = re.sub(r"[{}]", "", fields.get("year", ""))
-            out[m.group(3)] = ([_family(n) for n in re.split(r"\s+and\s+", names) if n.strip()], year)
+        for entry in json.loads(res.stdout or "[]"):
+            people = entry.get("author") or entry.get("editor") or []
+            names = [p.get("family") or p.get("literal") or "" for p in people]
+            parts = (entry.get("issued") or {}).get("date-parts") or [[]]
+            year = str(parts[0][0]) if parts and parts[0] else (entry.get("issued") or {}).get("literal", "")
+            out[entry["id"]] = ([n for n in names if n], year)
     return out
-
-
-def _bib_fields(entry: str) -> dict[str, str]:
-    fields: dict[str, str] = {}
-    for m in re.finditer(r"(\w+)\s*=\s*", entry):
-        key = m.group(1).lower()
-        i = skip_ws(entry, m.end())
-        if i < len(entry) and entry[i] == "{":
-            g = read_group(entry, i)
-            if g:
-                fields[key] = g[0]
-        elif i < len(entry) and entry[i] == '"':
-            j = entry.find('"', i + 1)
-            if j > 0:
-                fields[key] = entry[i + 1 : j]
-        else:
-            mv = re.match(r"[^,\n]+", entry[i:])
-            if mv:
-                fields[key] = mv.group(0).strip()
-    return fields
-
-
-def _family(name: str) -> str:
-    name = re.sub(r"\s+", " ", name.strip())
-    if name.startswith("{") and name.endswith("}"):
-        return name[1:-1]
-    if "," in name:
-        return name.split(",")[0].strip()
-    # "First von Last": the last token, keeping braced groups together
-    tokens = re.findall(r"\{[^}]*\}|\S+", name)
-    return tokens[-1] if tokens else name
 
 
 def author_text(names: list[str]) -> str:
@@ -480,8 +477,10 @@ def rewrite_textual_citations(body: str, bib: dict[str, tuple[list[str], str]]) 
                 elif kind == "yearpar":
                     pieces.append(f"({year})")
                 else:
-                    note = f"[{args[2]}]" if args[2] else ""
-                    pieces.append(f"{who}~\\cite{note}{{{k}}}")
+                    # natbib: one optional argument is the postnote, two are prenote and postnote
+                    notes = [a for a in (args[1], args[2]) if a is not None]
+                    opt = "".join(f"[{n}]" for n in notes)
+                    pieces.append(f"{who}~\\cite{opt}{{{k}}}")
             return ", ".join(pieces)
 
         return "soom", fn

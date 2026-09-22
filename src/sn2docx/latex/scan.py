@@ -275,8 +275,10 @@ def strip_comments(s: str) -> str:
                     out[-1] = out[-1].rstrip(" \t")
                 i = j + 1
                 continue
-            # trailing comment: join with the next line like TeX does
+            # trailing comment: join with the next line like TeX does ...
             i = skip_ws(s, j + 1, newlines=False)
+            if i >= n or s[i] in "\r\n":
+                out.append("\n")  # ... but an empty line after it still ends the paragraph
             continue
         out.append(c)
         i += 1
@@ -413,20 +415,20 @@ def first_arg(s: str, name: str, spec: str, index: int) -> str | None:
     return None
 
 
-_SYMBOLS = {
-    "star": "\u22c6", "ast": "\u2217", "dagger": "\u2020", "ddagger": "\u2021", "prime": "\u2032",
-    "alpha": "\u03b1", "beta": "\u03b2", "gamma": "\u03b3", "delta": "\u03b4", "S": "\u00a7", "P": "\u00b6",
-    "dag": "\u2020", "ddag": "\u2021", "TeX": "TeX", "LaTeX": "LaTeX", "circ": "\u2218", "bullet": "\u2022",
-    "dots": "\u2026", "ldots": "\u2026", "pm": "\u00b1", "times": "\u00d7", "infty": "\u221e",
-}
+@lru_cache(maxsize=1)
+def _latex2text():
+    from pylatexenc.latex2text import LatexNodes2Text, MacroTextSpec, get_default_latex_context_db
+
+    db = get_default_latex_context_db()
+    db.add_context_category("sn2docx", prepend=True, macros=[
+        MacroTextSpec("LaTeX", simplify_repl="LaTeX"),
+        MacroTextSpec("TeX", simplify_repl="TeX"),
+        MacroTextSpec("url", simplify_repl="%s"),
+    ])
+    return LatexNodes2Text(latex_context=db, math_mode="text")
 
 
 def latex_to_plain(s: str) -> str:
-    """Crude LaTeX-to-text for metadata fields, equation tags and alt text."""
-    s = re.sub(r"\\([A-Za-z]+)(?![A-Za-z])\s*", lambda m: _SYMBOLS.get(m.group(1), m.group(0)), s)
-    s = re.sub(r"\\(?:textbf|textit|emph|textrm|textsf|texttt|mathrm|mbox|text|textsc|fnm|sur|orgdiv|orgname|orgaddress|street|city|postcode|state|country|url)\s*", "", s)
-    s = re.sub(r"\\[A-Za-z@]+\*?", "", s)
-    s = s.replace("~", " ").replace("\\&", "&").replace("\\%", "%").replace("\\_", "_")
-    s = s.replace("{", "").replace("}", "").replace("$", "")
-    s = s.replace("---", "\u2014").replace("--", "\u2013").replace("``", "\u201c").replace("''", "\u201d")
-    return re.sub(r"\s+", " ", s).strip()
+    """LaTeX to plain text (document properties, equation tags, citation labels), via pylatexenc."""
+    text = _latex2text().latex_to_text(s)
+    return re.sub(r"\s+", " ", text.replace(" ", " ")).strip()

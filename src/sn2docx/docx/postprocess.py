@@ -48,7 +48,6 @@ DAGGERS = ["†", "‡", "§", "¶", "‖"]
 class Options:
     figure_width: float | None = 3.25  # inches; None = honour \includegraphics width
     date: str | None = None
-    header_prefix: str = "A PREPRINT"
 
 
 class PostProcessor:
@@ -99,13 +98,13 @@ class PostProcessor:
         self._pass_figures()
         self._pass_tables()
         self._pass_algorithms()
+        self._pass_theorems()
         self._pass_manual_bibliography()
         self._pass_citeproc_bibliography()
         for root in roots:
             self._pass_inline(root)
         self._style_lists()
         self._style_code_blocks()
-        _collapse_spaces(self.body)
         for root in roots:
             _remove_bookmarks(root, lambda name: name in self.our_bookmarks)
         self._header_and_properties()
@@ -479,7 +478,12 @@ class PostProcessor:
             multi = len(fig.panels) > 1 or bool(subcaps)
             new: list[etree._Element] = []
             for idx, panel in enumerate(fig.panels):
-                new += self._image_paragraphs([panel], "Compact" if multi else "CaptionedFigure")
+                paras = self._image_paragraphs([panel], "Compact" if multi else "CaptionedFigure")
+                if idx not in subcaps and panel.bookmark and paras:
+                    content = ox.content_children(paras[0])
+                    for c in self._bookmark_wrap(panel.bookmark, content):
+                        paras[0].append(c)
+                new += paras
                 if idx in subcaps:
                     runs = [ox.run(f"({panel.letter}) ")] + self._content_without_marker(subcaps[idx])
                     new.append(ox.paragraph(ox.ppr("Compact", keep_next=True, jc="center"),
@@ -530,13 +534,9 @@ class PostProcessor:
             if hdr is not None:
                 trpr.remove(hdr)
                 trpr.append(hdr)
-        if len(header_rows) > 1:
-            last = header_rows[-1]
-            for r in header_rows:
-                for tc in r.findall(q("w:tc")):
-                    span = tc.find(f"{q('w:tcPr')}/{q('w:gridSpan')}")
-                    if r is last or (span is not None and int(span.get(q("w:val"), "1")) > 1):
-                        _cell_border(tc, "bottom", 4)
+        if len(header_rows) > 1:  # the table style only rules off the first row
+            for tc in header_rows[-1].findall(q("w:tc")):
+                _cell_border(tc, "bottom", 4)
         for p in tbl.iter(q("w:p")):
             jc = p.find(f"{q('w:pPr')}/{q('w:jc')}")
             ox.set_ppr(p, pStyle=el("w:pStyle", {"w:val": "Compact"}), keepNext=el("w:keepNext"),
@@ -544,14 +544,28 @@ class PostProcessor:
                        jc=el("w:jc", {"w:val": jc.get(q("w:val")) if jc is not None else "left"}))
 
     def _apply_header_rows(self) -> None:
-        """TBLHDR markers say how many leading rows form the header (pandoc drops multi-row heads)."""
+        """Apply TBLHDR markers: header rows (pandoc drops multi-row heads) and partial rules.
+
+        Arguments: header row count, then ``row, first column, last column`` per
+        ``\\cmidrule``/``\\cline``; the rule becomes a bottom border on the cells it spans.
+        """
         for mk, p in self._marker_paragraphs("TBLHDR"):
-            n = self._args(mk)[0]
+            n, *rules = self._args(mk)
             tbl = p.getnext()
             p.getparent().remove(p)
             if tbl is None or tbl.tag != q("w:tbl"):
                 continue
-            for i, tr in enumerate(tbl.findall(q("w:tr"))):
+            rows = tbl.findall(q("w:tr"))
+            for r, first, last in zip(rules[0::3], rules[1::3], rules[2::3]):
+                if r < len(rows):
+                    col = 1
+                    for tc in rows[r].findall(q("w:tc")):
+                        span = tc.find(f"{q('w:tcPr')}/{q('w:gridSpan')}")
+                        width = int(span.get(q("w:val"), "1")) if span is not None else 1
+                        if col <= last and col + width - 1 >= first:
+                            _cell_border(tc, "bottom", 4)
+                        col += width
+            for i, tr in enumerate(rows):
                 trpr = tr.find(q("w:trPr"))
                 if trpr is not None:
                     for h in trpr.findall(q("w:tblHeader")):
@@ -639,8 +653,53 @@ class PostProcessor:
                 props = ox.ppr("Compact", keep_next=not last, jc="left",
                                borders={"bottom": 8} if last else None,
                                spacing={"before": "0", "after": "0", "line": "276", "lineRule": "auto"},
-                               ind={"left": left, "hanging": left} if left else None)
+                               ind=({"left": left, "hanging": left} if numbered else {"left": left}) if left else None)
                 new.append(ox.paragraph(props, runs))
+            _replace_block(block, new)
+
+    # ============================================================== theorems
+    _THEOREM_FONTS = {  # style -> (head bold, head italic, body italic), as in amsthm / sn-jnl
+        "plain": (True, False, True),
+        "definition": (True, False, False),
+        "remark": (False, True, False),
+        "roman-head": (False, False, True),
+    }
+
+    def _pass_theorems(self) -> None:
+        for mk, p in self._marker_paragraphs("THM"):
+            k = self._args(mk)[0]
+            thm = self.reg.theorems[k]
+            block = self._block(p, "THMEND", k)
+            note = next((b for name, _, b in self._block_markers(block) if name == "THMNOTE"), None)
+            body = [b for b in block[1:-1] if b is not note]
+            head_bold, head_italic, body_italic = self._THEOREM_FONTS.get(thm.style, self._THEOREM_FONTS["plain"])
+            head_font = ox.rpr(bold=head_bold, italic=head_italic)
+            head = [ox.run(thm.head, head_font)]
+            if note is not None:
+                head += [ox.run(" (")] + self._content_without_marker(note) + [ox.run(")")]
+            head.append(ox.run(".", head_font))
+            head.append(ox.run(" "))
+            if body_italic:
+                for b in body:
+                    if _is_equation(b):  # equation numbers stay upright, as in LaTeX
+                        continue
+                    for r in b.iter(q("w:r")):
+                        rp = r.find(q("w:rPr"))
+                        if rp is None or rp.find(q("w:i")) is None:
+                            _set_rpr(r, ox.rpr(italic=True, base=rp))
+            first = body[0] if body else None
+            content = ox.content_children(first) if first is not None and first.tag == q("w:p") else []
+            # the head runs into an ordinary first paragraph, but not into a display equation or list item
+            inline = (bool(content) and not _is_equation(first)
+                      and first.find(f"{q('w:pPr')}/{q('w:numPr')}") is None)
+            if inline:
+                for c in content:
+                    first.remove(c)
+                for c in head + ox.strip_leading_space(content):
+                    first.append(c)
+                new = body
+            else:
+                new = [ox.paragraph(ox.ppr("BodyText"), head), *body]
             _replace_block(block, new)
 
     # ========================================================== bibliography
@@ -754,7 +813,8 @@ class PostProcessor:
         return runs
 
     def _cite_runs(self, i: int, base) -> list[etree._Element]:
-        variant, keys = self.reg.cites[i]
+        """Citation against a ``thebibliography`` list (natbib semantics, numeric or author-year)."""
+        command, keys, pre, post = self.reg.cites[i]
         hl = ox.rpr(style="Hyperlink", color="000000", base=_strip_color(base))
         plain = copy.deepcopy(base) if base is not None else None
         nums = []
@@ -763,35 +823,43 @@ class PostProcessor:
                 nums.append(self._bibnum[k])
             else:
                 self.warn(f"undefined citation: {k}")
-        if self.conv.citation_mode == "author-year":
+        pre = latex_to_plain(pre) if pre else ""
+        post = latex_to_plain(post) if post else ""
+
+        def link(n: int, text: str) -> etree._Element:
+            h = el("w:hyperlink", {"w:anchor": f"bibref_{n}"})
+            h.append(ox.run(text, hl))
+            return h
+
+        def who_year(n: int) -> tuple[str, str]:
+            key = self.reg.bibitems[n - 1]
+            label = self.reg.bib_labels.get(key, "")
+            m = re.match(r"\{?(.*?)\((\d{4}[a-z]?)\)(.*)\}?$", label)
+            return (latex_to_plain(m.group(1)), m.group(2)) if m else (latex_to_plain(label) or key, "")
+
+        if command in ("citeauthor", "citeyear", "citeyearpar"):
             parts = []
             for n in nums:
-                lab = self.reg.bib_labels.get(self.reg.bibitems[n - 1], "")
-                m = re.match(r"\{?(.*?)\((\d{4}[a-z]?)\)(.*)\}?$", lab)
-                who, year = (latex_to_plain(m.group(1)), m.group(2)) if m else (latex_to_plain(lab) or "?", "")
-                parts.append((n, who, year))
-            runs: list[etree._Element] = []
-            textual = variant in ("citet", "textcite")
-            if not textual:
-                runs.append(ox.run("(", plain))
-            for j, (n, who, year) in enumerate(parts):
-                if j:
-                    runs.append(ox.run("; " if not textual else ", ", plain))
-                h = el("w:hyperlink", {"w:anchor": f"bibref_{n}"})
-                h.append(ox.run(f"{who} ({year})" if textual else f"{who}, {year}", hl))
-                runs.append(h)
-            if not textual:
-                runs.append(ox.run(")", plain))
-            return runs
-        runs = [ox.run("[", plain)]
-        for j, (a, b) in enumerate(_ranges(sorted(set(nums)))):
-            if j:
-                runs.append(ox.run(", ", plain))
-            h = el("w:hyperlink", {"w:anchor": f"bibref_{a}"})
-            h.append(ox.run(str(a) if a == b else f"{a}–{b}" if b > a + 1 else f"{a}, {b}", hl))
-            runs.append(h)
-        runs.append(ox.run("]", plain))
-        return runs
+                who, year = who_year(n)
+                parts.append(link(n, who if command == "citeauthor" else year))
+            runs = _joined(parts, ", ", plain)
+            return [ox.run("(", plain), *runs, ox.run(")", plain)] if command == "citeyearpar" else runs
+
+        textual = command in ("citet", "textcite")
+        if self.conv.citation_mode == "author-year":
+            if textual:  # Knuth (1984, p. 5)
+                parts = []
+                for n in nums:
+                    who, year = who_year(n)
+                    parts += [link(n, who), ox.run(f" ({year}", plain), ox.run(f", {post})" if post else ")", plain)]
+                    parts.append(ox.run(", ", plain))
+                return parts[:-1]
+            items = [link(n, "%s, %s" % who_year(n)) for n in nums]
+            runs = [ox.run("(" + (f"{pre} " if pre else ""), plain), *_joined(items, "; ", plain)]
+            return runs + [ox.run((f", {post}" if post else "") + ")", plain)]
+        items = [link(a, str(a) if a == b else f"{a}–{b}") for a, b in _ranges(sorted(set(nums)))]
+        runs = [ox.run("[" + (f"{pre} " if pre else ""), plain), *_joined(items, ", ", plain)]
+        return runs + [ox.run((f", {post}" if post else "") + "]", plain)]
 
     # ============================================================ properties
     def _header_and_properties(self) -> None:
@@ -802,12 +870,9 @@ class PostProcessor:
             date = f"{today:%B} {today.day}, {today.year}"
         for name in list(self.pkg.parts):
             if re.fullmatch(r"word/header\d*\.xml", name):
-                hdr = self.pkg.xml(name)
-                ts = list(hdr.iter(q("w:t")))
-                if ts and "PREPRINT" in "".join(t.text or "" for t in ts):
-                    ts[0].text = f"{self.opts.header_prefix} - {date.upper()}"
-                    for t in ts[1:]:
-                        t.text = ""
+                for t in self.pkg.xml(name).iter(q("w:t")):
+                    # the template's header carries a sample date; keep its case and surrounding text
+                    t.text = _DATE_RE.sub(lambda m: date.upper() if m.group(0).isupper() else date, t.text or "")
         title = latex_to_plain(fm.title)
         authors = [latex_to_plain(a.name) for a in fm.authors]
         core = self.pkg.xml("docProps/core.xml") if self.pkg.has("docProps/core.xml") else None
@@ -836,9 +901,12 @@ class PostProcessor:
 
 
 # ------------------------------------------------------------------ helpers
+_MONTHS = "January|February|March|April|May|June|July|August|September|October|November|December"
+_DATE_RE = re.compile(r"\b(?:%s) \d{1,2}, \d{4}\b" % _MONTHS, re.IGNORECASE)
 _BLOCK_MARKERS = {
     "FMTITLE", "FMAUTHOR", "FMAFFIL", "FMNOTE", "FMABSTRACT", "FMKEYWORDS", "FMEND", "HEAD", "EQ", "FIG", "FIGCAP",
     "SUBCAP", "FIGEND", "TAB", "TABCAP", "TABNOTE", "TABEND", "ALG", "ALGCAP", "ALGLINE", "ALGEND", "BIB", "TBLHDR",
+    "THM", "THMNOTE", "THMEND",
 }
 
 
@@ -900,6 +968,8 @@ def _cell_border(tc: etree._Element, side: str, sz: int) -> None:
         tcpr = el("w:tcPr")
         tc.insert(0, tcpr)
     b = tcpr.find(q("w:tcBorders"))
+    if b is not None and b.find(q(f"w:{side}")) is not None:
+        return
     if b is None:
         b = el("w:tcBorders")
         # tcBorders comes after tcW/gridSpan/vMerge in CT_TcPr
@@ -967,6 +1037,23 @@ def _strip_color(rp):
     return rp
 
 
+def _is_equation(p: etree._Element) -> bool:
+    """A display-equation paragraph (its first content is the equation itself)."""
+    if p.tag != q("w:p"):
+        return False
+    content = [c for c in ox.content_children(p) if c.tag not in (q("w:bookmarkStart"), q("w:bookmarkEnd"))]
+    return bool(content) and content[0].tag == q("m:oMath")
+
+
+def _joined(items: list[etree._Element], sep: str, props) -> list[etree._Element]:
+    out: list[etree._Element] = []
+    for j, item in enumerate(items):
+        if j:
+            out.append(ox.run(sep, props))
+        out.append(item)
+    return out
+
+
 def _ranges(nums: list[int]) -> list[tuple[int, int]]:
     out: list[tuple[int, int]] = []
     for n in nums:
@@ -982,27 +1069,6 @@ def _ranges(nums: list[int]) -> list[tuple[int, int]]:
         else:
             res.append((a, b))
     return res
-
-
-def _collapse_spaces(body: etree._Element) -> None:
-    """Drop a space-only run that follows text already ending in a space (pandoc theorem heads)."""
-    for p in body.iter(q("w:p")):
-        prev_text = None
-        for r in list(p):
-            if r.tag in (q("w:bookmarkStart"), q("w:bookmarkEnd")):
-                continue  # zero-width
-            if r.tag != q("w:r"):
-                prev_text = None
-                continue
-            ts = r.findall(q("w:t"))
-            if len(ts) != 1 or len(r) - (r.find(q("w:rPr")) is not None) != 1:
-                prev_text = None
-                continue
-            text = ts[0].text or ""
-            if text == " " and prev_text is not None and prev_text.endswith(" "):
-                p.remove(r)
-                continue
-            prev_text = text
 
 
 def _remove_bookmarks(root: etree._Element, keep) -> list[int]:
@@ -1029,8 +1095,8 @@ def _set_child(parent: etree._Element, tag: str, text: str) -> etree._Element:
     return e
 
 
-def postprocess(pandoc_docx: Path, out: Path, conv: Conversion, template: Path, opts: Options) -> None:
+def postprocess(pandoc_docx: Path, out: Path, conv: Conversion, template: Package, opts: Options) -> None:
     """Rewrite pandoc's docx into the template layout; problems are reported through logging."""
     pkg = Package.open(pandoc_docx)
-    PostProcessor(pkg, conv, Package.open(template), opts).run()
+    PostProcessor(pkg, conv, template, opts).run()
     pkg.save(out)

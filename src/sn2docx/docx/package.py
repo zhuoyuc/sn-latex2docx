@@ -131,9 +131,9 @@ def resolve_target(rels_name: str, target: str) -> str:
     return posixpath.normpath(posixpath.join(folder, target))
 
 
-def make_reference_doc(template: Path, dest: Path) -> Path:
+def make_reference_doc(template: Package, dest: Path) -> Path:
     """Copy the Word template, keeping styles/header/footer/section but no content or media."""
-    pkg = Package.open(template)
+    pkg = Package(OrderedDict(template.parts))  # the template itself stays untouched
     doc = pkg.xml("word/document.xml")
     body = doc.find(q("w:body"))
     sect = body.find(q("w:sectPr"))

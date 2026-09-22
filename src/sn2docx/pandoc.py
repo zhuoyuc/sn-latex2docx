@@ -16,11 +16,21 @@ log = logging.getLogger(__name__)
 MIN_PANDOC = (3, 0)
 
 
+@cache
 def pandoc_executable() -> str:
+    """pandoc on PATH, else the binary bundled with ``pypandoc_binary`` (``uv sync --extra pandoc``)."""
     exe = shutil.which("pandoc")
-    if not exe:
-        raise RuntimeError("pandoc not found on PATH; install pandoc >= 3.0 (https://pandoc.org/installing.html)")
-    return exe
+    if exe:
+        return exe
+    try:
+        import pypandoc
+
+        return pypandoc.get_pandoc_path()
+    except (ImportError, OSError):
+        raise RuntimeError(
+            "pandoc not found: install pandoc >= 3.0 (https://pandoc.org/installing.html) "
+            "or the bundled build with `uv sync --extra pandoc`"
+        ) from None
 
 
 @cache

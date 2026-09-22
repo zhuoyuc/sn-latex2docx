@@ -166,7 +166,7 @@
       <group delimiter=", ">
         <text macro="author-short"/>
         <text macro="year"/>
-        <text variable="locator"/>
+        <group delimiter=" "><label variable="locator" form="short"/><text variable="locator"/></group>
       </group>
     </layout>
   </citation>

@@ -32,6 +32,10 @@ def test_strip_comments_joins_lines_and_keeps_verbatim():
     assert "whole line" not in out
 
 
+def test_strip_comments_keeps_paragraph_break_after_comment():
+    assert strip_comments("foo % c\n\nbar") == "foo \n\nbar"
+
+
 def test_strip_comments_removes_verb_inside_comment():
     # a \verb inside a comment is part of the comment, not a verbatim region
     assert strip_comments("a %% see \\verb+\\bibliography+ here\nb") == "a b"

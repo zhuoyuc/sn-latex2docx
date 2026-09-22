@@ -111,19 +111,39 @@ class Algorithm:
 
 
 @dataclass
+class TheoremSpec:
+    """A ``\\newtheorem`` declaration."""
+
+    title: str  # e.g. "Theorem"
+    counter: str | None  # counter name (shared counters point to the same name); None = unnumbered
+    style: str = "plain"  # plain | definition | remark | roman-head (sn-jnl thmstyletwo)
+    within: int = 0  # 1 = numbered within section ("2.1"), 2 = within subsection, 0 = global
+
+
+@dataclass
+class Theorem:
+    """One theorem-like environment instance; the head is written by the post-processor."""
+
+    head: str  # "Theorem 2.1"
+    style: str
+    has_note: bool = False  # optional argument, e.g. [Pythagoras]
+
+
+@dataclass
 class Registry:
     headings: list[Heading] = field(default_factory=list)
     equations: list[Equation] = field(default_factory=list)
     figures: list[Figure] = field(default_factory=list)
     tables: list[Table] = field(default_factory=list)
     algorithms: list[Algorithm] = field(default_factory=list)
+    theorems: list[Theorem] = field(default_factory=list)
     labels: dict[str, Label] = field(default_factory=dict)
     # \ref-style references: index -> (label name, variant)
     refs: list[tuple[str, str]] = field(default_factory=list)
     # point anchors (theorems, algorithm lines, ...): index -> bookmark
     anchors: list[str] = field(default_factory=list)
-    # manual bibliography (thebibliography): citation index -> keys
-    cites: list[tuple[str, list[str]]] = field(default_factory=list)
+    # manual bibliography (thebibliography): citation index -> (command, keys, prenote, postnote)
+    cites: list[tuple[str, list[str], str | None, str | None]] = field(default_factory=list)
     bibitems: list[str] = field(default_factory=list)  # keys in order
     bib_labels: dict[str, str] = field(default_factory=dict)  # key -> \bibitem optional label
     bookmarks: set[str] = field(default_factory=set)  # lower-cased names in use

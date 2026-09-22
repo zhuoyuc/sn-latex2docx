@@ -10,11 +10,14 @@ dependencies = [
     "lxml>=5.0",
     "pymupdf>=1.24",
     "pillow>=10.0",
+    "pylatexenc>=2.10",
 ]
 
 [project.optional-dependencies]
 # Word automation, used only by scripts/ for rendering and field checks on Windows.
 word = ["pywin32>=306; sys_platform == 'win32'"]
+# A pandoc binary shipped as a wheel, for machines without a system pandoc.
+pandoc = ["pypandoc_binary>=1.13"]
 
 [project.scripts]
 sn2docx = "sn2docx.cli:main"
