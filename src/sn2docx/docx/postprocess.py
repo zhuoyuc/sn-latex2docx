@@ -736,13 +736,6 @@ class PostProcessor:
             for c in self._bookmark_wrap(new_name, content):
                 p.append(c)
             p.replace(p.find(q("w:pPr")), _bib_ppr())
-        # the References heading pandoc inserted right before the list
-        first = bib_paras[0]
-        cur = first.getprevious()
-        while cur is not None and cur.tag != q("w:p"):
-            cur = cur.getprevious()
-        if cur is not None and (ox.para_style(cur) or "").startswith("Heading"):
-            ox.set_ppr(cur, numPr=ox.num_pr(0, 0))
         for root in self.roots:
             for h in root.iter(q("w:hyperlink")):
                 anchor = h.get(q("w:anchor"))
@@ -782,7 +775,7 @@ class PostProcessor:
         lab = self.reg.labels.get(label)
         if lab is None:
             return "??"
-        prefix, parens = format_ref(lab, variant)
+        prefix, parens = format_ref(lab, variant, self.conv.cref_names)
         number = f"({lab.text})" if parens else lab.text
         return f"{prefix} {number}" if prefix else number
 
@@ -794,7 +787,7 @@ class PostProcessor:
             return [ox.run("??", base) if base is not None else ox.run("??", bold=True)]
         hl = ox.rpr(style="Hyperlink", base=_strip_color(base))
         runs: list[etree._Element] = []
-        prefix, parens = format_ref(lab, variant)
+        prefix, parens = format_ref(lab, variant, self.conv.cref_names)
         if prefix:
             runs.append(ox.run(f"{prefix} ", hl))
         if parens:
@@ -981,18 +974,29 @@ def _cell_border(tc: etree._Element, side: str, sz: int) -> None:
     b.append(el(f"w:{side}", {"w:val": "single", "w:sz": str(sz), "w:space": "0", "w:color": "000000"}))
 
 
-def format_ref(lab: Label, variant: str) -> tuple[str, bool]:
+def format_ref(lab: Label, variant: str, overrides: dict[str, dict[str, tuple[str, str]]] | None = None) -> tuple[str, bool]:
     """Type-name prefix (may be empty) and whether the number is parenthesised.
 
     ``variant`` comes from :func:`sn2docx.latex.transform.replace_refs`: ``ref``,
-    ``eq``, ``cref``/``Cref`` (``+`` suffix: plural) or ``bare``.
+    ``eq``, ``cref``/``Cref`` (``+`` suffix: plural) or ``bare``. Names declared with
+    ``\\crefname``/``\\Crefname`` (``overrides``) win over the built-in ones.
     """
     prefix = ""
-    if variant.rstrip("+") in ("cref", "Cref"):
-        names = CREF_NAMES.get(lab.kind, (lab.kind, lab.kind.capitalize()))
-        prefix = names[0] if variant.startswith("cref") else names[1]
-        if variant.endswith("+"):
-            prefix = CREF_PLURALS.get(prefix, prefix + "s")
+    style = variant.rstrip("+")
+    if style in ("cref", "Cref"):
+        plural = variant.endswith("+")
+        declared = next((overrides[t][style] for t in (lab.ref_type, lab.kind)
+                         if t and overrides and style in overrides.get(t, {})), None)
+        if declared is not None:
+            prefix = declared[1] if plural else declared[0]
+        else:
+            if lab.type_name:  # theorem-like environments use their own title ("Lemma")
+                prefix = lab.type_name
+            else:
+                names = CREF_NAMES.get(lab.kind, (lab.kind, lab.kind.capitalize()))
+                prefix = names[0] if style == "cref" else names[1]
+            if plural:
+                prefix = CREF_PLURALS.get(prefix, prefix + "s")
     parens = variant == "eq" or (variant != "ref" and lab.kind == "equation")
     return prefix, parens
 

@@ -54,6 +54,8 @@ class Label:
     text: str  # number as printed by \ref
     bookmark: str = ""
     field: bool = False  # True when the target carries a SEQ field / numbered heading
+    ref_type: str = ""  # cleveref type (counter or environment name: "subsection", "lemma" ...); "" = kind
+    type_name: str = ""  # default cleveref name when not "kind"-based, e.g. a theorem's title "Lemma"
 
 
 @dataclass
@@ -184,3 +186,5 @@ class Conversion:
     citation_mode: str  # "numeric" | "author-year"
     manual_bibliography: bool = False
     equal_notes: list[str] = field(default_factory=list)  # distinct \equalcont texts
+    # \crefname / \Crefname: cleveref type -> {"cref": (singular, plural), "Cref": (...)}
+    cref_names: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)

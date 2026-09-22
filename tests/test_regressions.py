@@ -84,7 +84,7 @@ def _paragraphs(path: Path) -> list[etree._Element]:
 
 
 def test_theorem_heads_and_section_numbering(edge):
-    texts = [text_of(p).replace(" ", " ") for p in _paragraphs(edge.output)]
+    texts = [text_of(p).replace("\u00a0", " ") for p in _paragraphs(edge.output)]
     assert any(t.startswith("Definition 3.1 (Charge). Ions such as") for t in texts)
     assert "See Definition 3.1." in texts
     assert any(t.startswith("Lemma 1. A lemma") for t in texts)
@@ -108,5 +108,24 @@ def test_cmidrule_becomes_border_under_spanned_cells_only(edge):
 
 def test_manual_citation_notes_rendered(edge):
     joined = " ".join(text_of(p) for p in _paragraphs(edge.output))
-    assert "(see Knuth, 1984, p. 5)" in joined or "(see Knuth, 1984, p. 5)" in joined
+    assert "(see Knuth, 1984, p. 5)" in joined.replace("\u00a0", " ")
     assert "author only: Lamport; year only: 1984." in joined
+
+
+def test_svg_figure_embedded(edge):
+    texts = [text_of(p) for p in _paragraphs(edge.output)]
+    assert "Figure 3: A vector diagram supplied as SVG." in texts
+    with zipfile.ZipFile(edge.output) as z:
+        assert any(n.startswith("word/media/") for n in z.namelist())
+
+
+def test_crefname_theorem_names_and_subfloat_letters(edge):
+    joined = " ".join(text_of(p).replace("\u00a0", " ") for p in _paragraphs(edge.output))
+    assert "Panel 2a. Named: Lemma 1, fig. 1 and Figs. 1 and 3." in joined
+
+
+def test_parse_crefnames():
+    from sn2docx.latex.preprocess import parse_crefnames
+
+    names = parse_crefnames(r"\crefname{figure}{fig.}{figs.}\Crefname{equation}{Equation}{Equations}")
+    assert names == {"figure": {"cref": ("fig.", "figs.")}, "equation": {"Cref": ("Equation", "Equations")}}

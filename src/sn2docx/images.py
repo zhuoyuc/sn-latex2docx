@@ -14,7 +14,7 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SEARCH_EXTS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".tif", ".tiff", ".gif", ".bmp")
+SEARCH_EXTS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg", ".tif", ".tiff", ".gif", ".bmp")
 DPI = 300
 
 
@@ -45,10 +45,11 @@ def _ghostscript() -> str | None:
     return None
 
 
-def _pdf_to_png(pdf: Path | bytes, page: int = 0) -> RasterImage:
+def _render(src: Path | bytes, page: int = 0, filetype: str = "pdf") -> RasterImage:
+    """Rasterise a vector page (PDF, or SVG) with PyMuPDF at :data:`DPI`."""
     import pymupdf
 
-    doc = pymupdf.open(stream=pdf, filetype="pdf") if isinstance(pdf, bytes) else pymupdf.open(pdf)
+    doc = pymupdf.open(stream=src, filetype=filetype) if isinstance(src, bytes) else pymupdf.open(src, filetype=filetype)
     try:
         pg = doc[min(page, len(doc) - 1)]
         pix = pg.get_pixmap(dpi=DPI, alpha=False)
@@ -74,7 +75,7 @@ def _eps_to_png(path: Path) -> RasterImage:
             out = Path(tmp) / "out.pdf"
             res = subprocess.run([epstopdf, str(path), f"--outfile={out}"], capture_output=True)
             if res.returncode == 0 and out.is_file():
-                return _pdf_to_png(out.read_bytes())
+                return _render(out.read_bytes())
     raise RuntimeError(f"cannot convert {path}: no Ghostscript (gs/gswin64c/mgs) or epstopdf available")
 
 
@@ -106,8 +107,8 @@ def load_image(path: Path, options: str | None = None) -> RasterImage:
         m = re.search(r"page\s*=\s*(\d+)", options)
         if m:
             page = int(m.group(1)) - 1
-    if ext == ".pdf":
-        return _pdf_to_png(path, page)
+    if ext in (".pdf", ".svg"):
+        return _render(path, page, ext[1:])
     if ext in (".eps", ".ps"):
         return _eps_to_png(path)
     return _raster_from_bytes(path.read_bytes(), keep_jpeg=True)

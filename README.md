@@ -45,10 +45,10 @@ From Python: `from sn2docx.pipeline import convert; convert(Path("main.tex"), Pa
 | `\section*`, `\bmhead` | unnumbered *Heading 1* |
 | `appendices` / `\appendix` | lettered headings (A, A.1) from the template's appendix list |
 | `equation`, `align`, `gather`, `multline`, `eqnarray`, `\[…\]` | native Word equations; numbered rows get `(SEQ equation)` at a right tab stop; `\nonumber`/`\notag`/starred stay unnumbered; `\tag{}` is kept as static text |
-| `figure`, `subfigure`, `\subfloat`, `\subcaptionbox`, `sidewaysfigure` | centred images (PNG/JPEG kept, PDF and EPS rasterised at 300 dpi), `(a)` sub-captions, *Image Caption* "Figure `SEQ figure`: …" |
+| `figure`, `subfigure`, `\subfloat`, `\subcaptionbox`, `sidewaysfigure` | centred images (PNG/JPEG kept; PDF, SVG and EPS rasterised at 300 dpi), `(a)` sub-captions, *Image Caption* "Figure `SEQ figure`: …" |
 | `table`, `tabular(*)`, `tabularx`, `longtable`, booktabs, `\cmidrule`, `\multicolumn`, `\multirow`, `\footnotetext`, `threeparttable` | template table style (top/bottom rules, header rule, header rows repeat), `\cmidrule`/`\cline` as rules under exactly the spanned cells, table notes, *Table Caption* "Table `SEQ table`: …" below the table |
 | `algorithm` + `algorithmic` (algpseudocode) | "Algorithm `SEQ algorithm`" caption between rules, indented lines with bold keywords, line numbers when `[1]` is given |
-| `\ref`, `\eqref`, `\cref`, `\Cref`, `\crefrange`, `\autoref` | `REF` fields to bookmarks (sections use `\w` for full numbers like 3.1.1); theorem/line/sub-figure targets become internal hyperlinks |
+| `\ref`, `\eqref`, `\cref`, `\Cref`, `\crefrange`, `\autoref` | `REF` fields to bookmarks (sections use `\w` for full numbers like 3.1.1); theorem/line/sub-figure targets become internal hyperlinks; names follow `\crefname`/`\Crefname`, theorem-like targets use their own title ("Lemma 2") |
 | `\cite`, `\citep`, `\citet`, `\citeauthor` + `.bib` | citeproc with a bundled CSL matching the template: `[1]`, `[1–4]`, `Roe et al. [2]`, `[1, p. 5]`; each number links to its entry; author–year styles (`sn-mathphys-ay`, `sn-basic`, `sn-apa`, `sn-chicago`, …) get the author–year CSL |
 | `thebibliography` / pasted `.bbl` | parsed directly; numbered or author–year from `\bibitem[…]` labels, with pre/post notes, `\citeauthor`, `\citeyear` |
 | `newtheorem` environments, `proof` | heads written from the manuscript's own counters: shared counters, `[section]` numbering ("Definition 3.1"), optional notes, the three sn-jnl theorem styles; □ at the end of proofs |
@@ -102,7 +102,7 @@ scripts/word_check.py        Word-based field verification and PDF/PNG rendering
 
 ## Verification
 
-* `uv run pytest` – 51 tests: scanner, front matter, numbering, tables, algorithms,
+* `uv run pytest` – 54 tests: scanner, front matter, numbering, tables, algorithms,
   siunitx/mhchem, one regression test per fixed bug, and end-to-end conversions of all
   three manuscripts. The reference
   manuscript is compared with `template.docx`: same heading tree, caption numbers,
@@ -119,11 +119,9 @@ scripts/word_check.py        Word-based field verification and PDF/PNG rendering
 
 * Display equations follow the template: an inline Word equation followed by a tab and the
   number, so large operators and fractions use Word's inline sizing.
-* Figures are rasterised when they are PDF/EPS. SVG is not supported (a placeholder is inserted).
+* PDF, EPS and SVG figures are rasterised at 300 dpi (Word cannot embed them as vectors).
 * Multi-panel figures stack panels vertically (one image per line with its sub-caption).
 * Cell colours are dropped.
-* Custom `cleveref` names (`\crefname`) are not read; the names in `CREF_NAMES`
-  (`postprocess.py`) are used.
 * Journal-specific commands outside sn-jnl and the common packages above are passed to
   pandoc as-is; check the warnings the CLI prints.
 
@@ -138,7 +136,7 @@ what was checked and why the remaining pieces are written here.
 | Citation formatting, bibliography | pandoc citeproc + CSL | two bundled CSL styles |
 | Reading `.bib` files (names, years for `\citet`) | pandoc (`-t csljson`) | replaced a hand-written BibTeX reader; same parser as citeproc |
 | LaTeX → plain text (document properties, tags, citation labels) | [pylatexenc](https://github.com/phfaist/pylatexenc) | replaced a regex/symbol-table converter; accents, symbols, `~` |
-| PDF figures → PNG | PyMuPDF | |
+| PDF and SVG figures → PNG | PyMuPDF | |
 | EPS figures → PNG | Ghostscript (`gs`/`gswin64c`/MiKTeX `mgs`), `epstopdf` fallback | Pillow's EPS plugin also calls Ghostscript but cannot find MiKTeX's `mgs` |
 | Raster formats, TIFF → PNG | Pillow | |
 | XML editing of the .docx parts | lxml | |

@@ -17,6 +17,7 @@ from .scan import (
     map_nonverbatim,
     parse_command_args,
     read_optional,
+    latex_to_plain,
     replace_commands,
 )
 from .source import collect_macros, expand_macros, load_manuscript
@@ -94,6 +95,16 @@ def parse_theorems(preamble: str) -> dict[str, TheoremSpec]:
     return envs
 
 
+def parse_crefnames(preamble: str) -> dict[str, dict[str, tuple[str, str]]]:
+    """``\\crefname{type}{singular}{plural}`` and ``\\Crefname`` declarations (cleveref)."""
+    names: dict[str, dict[str, tuple[str, str]]] = {}
+    for cmd, style in (("crefname", "cref"), ("Crefname", "Cref")):
+        for _, _, args in find_commands(preamble, cmd, spec="mmm"):
+            names.setdefault((args[0] or "").strip(), {})[style] = (
+                latex_to_plain(args[1] or ""), latex_to_plain(args[2] or ""))
+    return names
+
+
 def citation_mode(options: list[str], style: str | None) -> str:
     opts = set(options)
     if style:
@@ -169,6 +180,9 @@ _CITE_COMMANDS = ("cite", "citep", "citet", "citealp", "citealt", "citeauthor", 
                   "Citep", "Citet", "parencite", "textcite", "autocite", "citenum")
 
 
+_CITES_RE = re.compile(r"\\(?:[Cc]ite[a-z]*|nocite|parencite|textcite|autocite)\*?(?![A-Za-z@])")
+
+
 def _manual_citations(text: str, reg: Registry) -> str:
     """Citations against a ``thebibliography`` list become CITE markers.
 
@@ -235,12 +249,13 @@ def preprocess(path: Path) -> PreprocessResult:
         front.abstract = _manual_citations(front.abstract, reg)
     body = map_nonverbatim(body, lambda s: _SKIP_RE.sub("", replace_commands(s, _BODY_COMMANDS)))
 
-    if manual:
+    # One unnumbered References heading for both bibliography sources. citeproc appends
+    # its list at the very end of the document, i.e. right after this heading.
+    if manual or (bib_files and _CITES_RE.search(body)):
         reg.headings.append(Heading(1, False, False, ""))
-        parts = [f"\n\n\\section{{{marker('HEAD', len(reg.headings) - 1)}References}}\n\n"]
-        for n, (_, text) in enumerate(bib_items):
-            parts.append(f"{marker('BIB', n)} {text}\n\n")
-        body += "".join(parts)
+        body += f"\n\n\\section{{{marker('HEAD', len(reg.headings) - 1)}References}}\n\n"
+    if manual:
+        body += "".join(f"{marker('BIB', n)} {text}\n\n" for n, (_, text) in enumerate(bib_items))
 
     fm_parts = []
     if front.title:
@@ -271,5 +286,6 @@ def preprocess(path: Path) -> PreprocessResult:
         citation_mode=mode,
         manual_bibliography=manual,
         equal_notes=notes,
+        cref_names=parse_crefnames(preamble),
     )
     return PreprocessResult(pandoc_tex, conv)

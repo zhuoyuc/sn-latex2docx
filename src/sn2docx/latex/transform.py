@@ -245,6 +245,7 @@ class Transformer:
 
         def target(label: str) -> str:
             lab = self._bind(label, "appendix" if self.appendix and level == 1 else "section", number, field=numbered)
+            lab.ref_type = "appendix" if self.appendix and level == 1 else ("section", "subsection", "subsubsection")[level - 1]
             if h.bookmark is None:
                 h.bookmark = lab.bookmark
             else:  # second label on the same heading: alias via anchor
@@ -333,6 +334,7 @@ class Transformer:
         main_label: str | None = None
         subcaps: list[tuple[int, str]] = []
         sub_labels: list[tuple[int, str]] = []
+        sub_panels: list[int] = []
 
         def add_panel(inner: str, cap: str | None) -> None:
             labs: list[str] = []
@@ -340,6 +342,7 @@ class Transformer:
             cap = _pop_labels(cap, labs) if cap is not None else None
             has_caption = bool(cap and cap.strip())
             panels.append(Panel(_images(inner), caption=has_caption))
+            sub_panels.append(len(panels) - 1)
             if has_caption:
                 subcaps.append((len(panels) - 1, cap))
             sub_labels.extend((len(panels) - 1, lab) for lab in labs)
@@ -391,7 +394,8 @@ class Transformer:
             fig.bookmark = self._bind(main_label, "figure", number or "", field=number is not None).bookmark
         k = len(self.reg.figures)
         self.reg.figures.append(fig)
-        for n, (idx, _) in enumerate(subcaps):
+        # every sub-float gets a letter, as in LaTeX, whether or not it has a sub-caption
+        for n, idx in enumerate(sub_panels):
             panels[idx].letter = string.ascii_lowercase[n % 26]
         for idx, lab in sub_labels:
             text = f"{number or ''}{panels[idx].letter}"
@@ -536,7 +540,9 @@ class Transformer:
         saved = self._target
 
         def target(label: str) -> str:
-            return self._anchor_label(label, "theorem", number)
+            lab = self._bind(label, "theorem", number)
+            lab.ref_type, lab.type_name = name, spec.title
+            return marker("ANCHOR", self.reg.add_anchor(lab.bookmark))
 
         self._target = target
         inner = self.walk(s[after : end[0]])

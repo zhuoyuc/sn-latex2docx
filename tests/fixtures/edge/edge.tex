@@ -9,6 +9,9 @@
 \DeclareMathOperator{\diag}{diag}
 \newtheorem{lemma}{Lemma}
 \newtheorem{corollary}[lemma]{Corollary}
+\usepackage{cleveref}
+\crefname{figure}{fig.}{figs.}
+\Crefname{figure}{Fig.}{Figs.}
 \theoremstyle{thmstylethree}
 \newtheorem{defn}{Definition}[section]
 
@@ -93,7 +96,12 @@ starts a new paragraph here.
   \subfloat{\includegraphics{missing-image}\label{fig:nocap}}
   \caption{No sub-caption.}
 \end{figure}
-Panel~\ref{fig:nocap}.
+Panel~\ref{fig:nocap}. Named: \Cref{lem:first}, \cref{fig:sub} and \Cref{fig:sub,fig:svg}.
+
+\begin{figure}
+  \includegraphics{diagram}
+  \caption{A vector diagram supplied as SVG.}\label{fig:svg}
+\end{figure}
 
 \begin{table}
 \caption{Partial rules}\label{tab:rules}

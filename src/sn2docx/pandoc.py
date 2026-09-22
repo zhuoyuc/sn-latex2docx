@@ -59,7 +59,7 @@ def run_pandoc(tex: str, conv: Conversion, reference_doc: Path, out: Path, workd
     ]
     if conv.bibliography and not conv.manual_bibliography:
         style = csl or resource_path(f"csl/{conv.citation_mode}.csl")
-        cmd += ["--citeproc", "--csl", str(Path(style).resolve()), "-M", "link-citations=true", "-M", "reference-section-title=References"]
+        cmd += ["--citeproc", "--csl", str(Path(style).resolve()), "-M", "link-citations=true"]
         for b in conv.bibliography:
             cmd += ["--bibliography", str(b.resolve())]
     log.debug("running %s", " ".join(cmd))
