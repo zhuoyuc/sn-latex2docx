@@ -32,6 +32,11 @@ def test_strip_comments_joins_lines_and_keeps_verbatim():
     assert "whole line" not in out
 
 
+def test_strip_comments_removes_verb_inside_comment():
+    # a \verb inside a comment is part of the comment, not a verbatim region
+    assert strip_comments("a %% see \\verb+\\bibliography+ here\nb") == "a b"
+
+
 def test_find_env_handles_nesting():
     s = r"\begin{a}x\begin{a}y\end{a}z\end{a}tail"
     env = find_env(s, "a")

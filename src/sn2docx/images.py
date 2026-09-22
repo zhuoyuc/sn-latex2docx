@@ -9,6 +9,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 
 log = logging.getLogger(__name__)
@@ -35,6 +36,7 @@ def resolve(source: str, search_dirs: list[Path]) -> Path | None:
     return None
 
 
+@cache
 def _ghostscript() -> str | None:
     for name in ("gswin64c", "gswin32c", "gs", "mgs"):
         exe = shutil.which(name)
@@ -66,7 +68,7 @@ def _eps_to_png(path: Path) -> RasterImage:
             if res.returncode == 0 and out.is_file():
                 return _raster_from_bytes(out.read_bytes())
             log.warning("ghostscript failed on %s: %s", path, res.stderr.decode(errors="replace")[:200])
-    epstopdf = shutil.which("epstopdf")
+    epstopdf = _epstopdf()
     if epstopdf:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.pdf"
@@ -74,6 +76,11 @@ def _eps_to_png(path: Path) -> RasterImage:
             if res.returncode == 0 and out.is_file():
                 return _pdf_to_png(out.read_bytes())
     raise RuntimeError(f"cannot convert {path}: no Ghostscript (gs/gswin64c/mgs) or epstopdf available")
+
+
+@cache
+def _epstopdf() -> str | None:
+    return shutil.which("epstopdf")
 
 
 def _raster_from_bytes(data: bytes, keep_jpeg: bool = False) -> RasterImage:
@@ -106,7 +113,7 @@ def load_image(path: Path, options: str | None = None) -> RasterImage:
     return _raster_from_bytes(path.read_bytes(), keep_jpeg=True)
 
 
-_UNIT_IN = {"in": 1.0, "cm": 1 / 2.54, "mm": 1 / 25.4, "pt": 1 / 72.27, "bp": 1 / 72.0, "pc": 12 / 72.27}
+UNIT_IN = {"in": 1.0, "cm": 1 / 2.54, "mm": 1 / 25.4, "pt": 1 / 72.27, "bp": 1 / 72.0, "pc": 12 / 72.27}
 
 
 def requested_width(options: str | None, text_width_in: float) -> float | None:
@@ -119,8 +126,5 @@ def requested_width(options: str | None, text_width_in: float) -> float | None:
         return f * text_width_in
     m = re.search(r"(?<![a-z])width\s*=\s*([0-9.]+)\s*(in|cm|mm|pt|bp|pc)", options)
     if m:
-        return float(m.group(1)) * _UNIT_IN[m.group(2)]
-    m = re.search(r"scale\s*=\s*([0-9.]+)", options)
-    if m:
-        return None
-    return None
+        return float(m.group(1)) * UNIT_IN[m.group(2)]
+    return None  # scale= and height= keep the default width

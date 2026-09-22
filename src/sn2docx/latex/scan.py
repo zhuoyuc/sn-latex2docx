@@ -8,12 +8,17 @@ verbatim regions. They never try to *execute* TeX.
 from __future__ import annotations
 
 import re
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
+from functools import lru_cache
 
 # Environments whose bodies must be passed through untouched.
 VERBATIM_ENVS = ("verbatim", "verbatim*", "Verbatim", "lstlisting", "minted", "comment")
 
-_ENV_BEGIN_RE = re.compile(r"\\begin\s*\{([^}]*)\}")
+ENV_BEGIN_RE = re.compile(r"\\begin\s*\{([^}]*)\}")
+_CONTROL_SEQ_RE = re.compile(r"\\([A-Za-z@]+|.)")
+_VERB_RE = re.compile(r"\\verb\*?([^A-Za-z\s])")
+_VERBATIM_BEGIN_RE = re.compile(r"\\begin\s*\{(" + "|".join(re.escape(e) for e in VERBATIM_ENVS) + r")\}")
 
 
 def is_escaped(s: str, i: int) -> bool:
@@ -75,6 +80,12 @@ def read_group(s: str, i: int, open_: str = "{", close: str = "}") -> tuple[str,
     return None
 
 
+def read_control_sequence(s: str, i: int) -> str | None:
+    """The control sequence (``\\name`` or ``\\x``) starting at ``s[i]``, if any."""
+    m = _CONTROL_SEQ_RE.match(s, i)
+    return m.group(0) if m else None
+
+
 def read_arg(s: str, i: int) -> tuple[str, int] | None:
     """Read a mandatory argument: a braced group or a single token."""
     i = skip_ws(s, i)
@@ -82,10 +93,9 @@ def read_arg(s: str, i: int) -> tuple[str, int] | None:
         return None
     if s[i] == "{":
         return read_group(s, i)
-    if s[i] == "\\":
-        m = re.match(r"\\([A-Za-z@]+|.)", s[i:])
-        if m:
-            return m.group(0), i + len(m.group(0))
+    cs = read_control_sequence(s, i) if s[i] == "\\" else None
+    if cs:
+        return cs, i + len(cs)
     return s[i], i + 1
 
 
@@ -127,9 +137,21 @@ def parse_command_args(s: str, i: int, spec: str) -> tuple[list[str | None], int
     return args, i
 
 
-def command_re(name: str) -> re.Pattern[str]:
-    """Regex matching ``\\name`` not followed by another letter."""
-    return re.compile(r"\\" + re.escape(name) + r"(?![A-Za-z@])")
+@lru_cache(maxsize=None)
+def command_re(*names: str) -> re.Pattern[str]:
+    """Regex matching ``\\name`` (any of ``names``) not followed by another letter."""
+    alts = "|".join(re.escape(n) for n in sorted(names, key=len, reverse=True))
+    return re.compile(r"\\(" + alts + r")(?![A-Za-z@])")
+
+
+@lru_cache(maxsize=None)
+def _env_begin_re(names: tuple[str, ...]) -> re.Pattern[str]:
+    return re.compile(r"\\begin\s*\{(" + "|".join(re.escape(n) for n in names) + r")\}")
+
+
+@lru_cache(maxsize=None)
+def _env_bounds_re(name: str) -> re.Pattern[str]:
+    return re.compile(r"\\(begin|end)\s*\{" + re.escape(name) + r"\}")
 
 
 @dataclass
@@ -146,30 +168,29 @@ class Env:
 
 def find_env_end(s: str, name: str, body_start: int) -> tuple[int, int] | None:
     """Find the matching ``\\end{name}`` for an environment whose body starts at ``body_start``."""
-    if name in VERBATIM_ENVS:
-        m = re.compile(r"\\end\s*\{" + re.escape(name) + r"\}").search(s, body_start)
-        return (m.start(), m.end()) if m else None
-    pat = re.compile(r"\\(begin|end)\s*\{" + re.escape(name) + r"\}")
+    pat = _env_bounds_re(name)
+    nested = name not in VERBATIM_ENVS  # verbatim bodies cannot nest
     depth = 1
     pos = body_start
     while True:
         m = pat.search(s, pos)
         if not m:
             return None
-        if is_escaped(s, m.start()):
-            pos = m.end()
+        pos = m.end()
+        if m.group(1) == "begin":
+            if nested and not is_escaped(s, m.start()):
+                depth += 1
             continue
-        depth += 1 if m.group(1) == "begin" else -1
+        if nested and is_escaped(s, m.start()):
+            continue
+        depth -= 1
         if depth == 0:
             return m.start(), m.end()
-        pos = m.end()
 
 
 def find_env(s: str, names: str | tuple[str, ...], start: int = 0) -> Env | None:
     """Find the first environment named in ``names`` at or after ``start``."""
-    if isinstance(names, str):
-        names = (names,)
-    pat = re.compile(r"\\begin\s*\{(" + "|".join(re.escape(n) for n in names) + r")\}")
+    pat = _env_begin_re((names,) if isinstance(names, str) else tuple(names))
     pos = start
     while True:
         m = pat.search(s, pos)
@@ -178,21 +199,41 @@ def find_env(s: str, names: str | tuple[str, ...], start: int = 0) -> Env | None
         if is_escaped(s, m.start()):
             pos = m.end()
             continue
-        name = m.group(1)
-        end = find_env_end(s, name, m.end())
+        end = find_env_end(s, m.group(1), m.end())
         if end is None:
             return None
-        return Env(name, m.start(), m.end(), end[0], end[1])
+        return Env(m.group(1), m.start(), m.end(), end[0], end[1])
 
 
-def iter_envs(s: str, names: str | tuple[str, ...]):
+def segments(s: str) -> Iterator[tuple[int, int, bool]]:
+    """Split ``s`` into ``(start, end, is_verbatim)`` runs.
+
+    Verbatim runs are verbatim-like environments and ``\\verb`` arguments; they
+    must reach pandoc untouched.
+    """
     pos = 0
+    n = len(s)
     while True:
-        env = find_env(s, names, pos)
-        if env is None:
+        env = _VERBATIM_BEGIN_RE.search(s, pos)
+        verb = _VERB_RE.search(s, pos)
+        m = min((x for x in (env, verb) if x is not None), key=lambda x: x.start(), default=None)
+        if m is None:
+            yield pos, n, False
             return
-        yield env
-        pos = env.end
+        yield pos, m.start(), False
+        if m is env:
+            end = find_env_end(s, m.group(1), m.end())
+            stop = end[1] if end else n
+        else:
+            j = s.find(m.group(1), m.end())
+            stop = n if j < 0 else j + 1
+        yield m.start(), stop, True
+        pos = stop
+
+
+def map_nonverbatim(s: str, fn: Callable[[str], str]) -> str:
+    """Apply ``fn`` to every non-verbatim run of ``s``."""
+    return "".join(s[a:b] if verbatim else fn(s[a:b]) for a, b, verbatim in segments(s))
 
 
 def strip_comments(s: str) -> str:
@@ -200,32 +241,28 @@ def strip_comments(s: str) -> str:
 
     A comment swallows the end of line and the leading whitespace of the next
     line, as TeX does, unless the comment occupies a whole line (then the line
-    disappears without joining its neighbours).
+    disappears without joining its neighbours). The scan is strictly left to
+    right, so a ``\\verb`` inside a comment is removed with the comment.
     """
     out: list[str] = []
     i = 0
     n = len(s)
-    verb_env = re.compile(r"\\begin\s*\{(" + "|".join(re.escape(e) for e in VERBATIM_ENVS) + r")\}")
     while i < n:
         c = s[i]
         if c == "\\":
-            m = verb_env.match(s, i)
+            m = _VERBATIM_BEGIN_RE.match(s, i)
             if m:
                 end = find_env_end(s, m.group(1), m.end())
                 stop = end[1] if end else n
-                out.append(s[i:stop])
-                i = stop
-                continue
-            m = re.match(r"\\verb\*?(.)", s[i:])
-            if m and not m.group(1).isalpha():
-                delim = m.group(1)
-                j = s.find(delim, i + len(m.group(0)))
-                stop = n if j < 0 else j + 1
-                out.append(s[i:stop])
-                i = stop
-                continue
-            out.append(s[i : i + 2])
-            i += 2
+            else:
+                m = _VERB_RE.match(s, i)
+                if m:
+                    j = s.find(m.group(1), m.end())
+                    stop = n if j < 0 else j + 1
+                else:
+                    stop = i + 2
+            out.append(s[i:stop])
+            i = stop
             continue
         if c == "%":
             j = s.find("\n", i)
@@ -321,35 +358,9 @@ def strip_top_level(s: str, ch: str = "&") -> str:
     return "".join(out)
 
 
-def remove_command(s: str, name: str, spec: str = "m", keep: int | None = None) -> str:
-    """Remove every ``\\name`` with arguments per ``spec``.
-
-    With ``keep`` set to an argument index, the command is replaced by that
-    argument's content instead of vanishing.
-    """
-    pat = command_re(name)
-    out: list[str] = []
-    pos = 0
-    while True:
-        m = pat.search(s, pos)
-        if not m:
-            break
-        if is_escaped(s, m.start()):
-            out.append(s[pos : m.end()])
-            pos = m.end()
-            continue
-        args, end = parse_command_args(s, m.end(), spec)
-        out.append(s[pos : m.start()])
-        if keep is not None:
-            out.append(args[keep] or "")
-        pos = end
-    out.append(s[pos:])
-    return "".join(out)
-
-
-def find_commands(s: str, name: str, spec: str = "m"):
-    """Yield ``(start, end, args)`` for each occurrence of ``\\name``."""
-    pat = command_re(name)
+def find_commands(s: str, *names: str, spec: str = "m") -> Iterator[tuple[int, int, list[str | None]]]:
+    """Yield ``(start, end, args)`` for each unescaped ``\\name`` of ``names``."""
+    pat = command_re(*names)
     pos = 0
     while True:
         m = pat.search(s, pos)
@@ -361,6 +372,45 @@ def find_commands(s: str, name: str, spec: str = "m"):
         args, end = parse_command_args(s, m.end(), spec)
         yield m.start(), end, args
         pos = end
+
+
+Handler = tuple[str, Callable[[list[str | None]], str]]
+
+
+def replace_commands(s: str, table: dict[str, Handler]) -> str:
+    """Replace each ``\\name`` of ``table`` (args parsed per its spec) by ``fn(args)``."""
+    if not table:
+        return s
+    pat = command_re(*table)
+    out: list[str] = []
+    pos = 0
+    while True:
+        m = pat.search(s, pos)
+        if not m:
+            break
+        if is_escaped(s, m.start()):
+            out.append(s[pos : m.end()])
+            pos = m.end()
+            continue
+        spec, fn = table[m.group(1)]
+        args, end = parse_command_args(s, m.end(), spec)
+        out.append(s[pos : m.start()])
+        out.append(fn(args))
+        pos = end
+    out.append(s[pos:])
+    return "".join(out)
+
+
+def remove_command(s: str, name: str, spec: str = "m", keep: int | None = None) -> str:
+    """Remove every ``\\name``; with ``keep`` set, leave that argument's content instead."""
+    return replace_commands(s, {name: (spec, lambda a: "" if keep is None else (a[keep] or ""))})
+
+
+def first_arg(s: str, name: str, spec: str, index: int) -> str | None:
+    """Argument ``index`` of the first ``\\name`` in ``s`` (None if absent)."""
+    for _, _, args in find_commands(s, name, spec=spec):
+        return args[index] or ""
+    return None
 
 
 _SYMBOLS = {

@@ -47,7 +47,7 @@ def rpr(style: str | None = None, bold=False, italic=False, sup=False, size: int
         r.append(el("w:szCs", {"w:val": str(size)}))
     if sup:
         r.append(el("w:vertAlign", {"w:val": "superscript"}))
-    _order_rpr(r)
+    _sort_children(r, _RPR_ORDER)
     return r if len(r) else None
 
 
@@ -57,16 +57,10 @@ _RPR_ORDER = ["rStyle", "rFonts", "b", "bCs", "i", "iCs", "caps", "smallCaps", "
               "vertAlign", "lang"]
 
 
-def _order_rpr(r: etree._Element) -> None:
-    def key(c):
-        local = etree.QName(c).localname
-        return _RPR_ORDER.index(local) if local in _RPR_ORDER else len(_RPR_ORDER)
-
-    children = sorted(list(r), key=key)
-    for c in list(r):
-        r.remove(c)
-    for c in children:
-        r.append(c)
+def _sort_children(parent: etree._Element, order: list[str]) -> None:
+    """Reorder children into schema order (unknown elements go last, stable)."""
+    rank = {name: i for i, name in enumerate(order)}
+    parent[:] = sorted(parent, key=lambda c: rank.get(etree.QName(c).localname, len(order)))
 
 
 def run(text: str = "", props: etree._Element | None = None, **kw) -> etree._Element:
@@ -82,37 +76,24 @@ def run(text: str = "", props: etree._Element | None = None, **kw) -> etree._Ele
     return r
 
 
-def special_run(tag: str, props: etree._Element | None = None) -> etree._Element:
+def special_run(tag: str | etree._Element, props: etree._Element | None = None) -> etree._Element:
+    """A run holding one non-text child (``w:tab``, ``w:br``, a ``w:fldChar`` …)."""
     r = el("w:r")
     if props is not None:
         r.append(copy.deepcopy(props))
-    r.append(el(tag))
+    r.append(el(tag) if isinstance(tag, str) else tag)
     return r
 
 
 def field(instr: str, result: str, props: etree._Element | None = None) -> list[etree._Element]:
     """Complex field runs: begin, instruction, separate, cached result, end."""
-    begin = el("w:r")
-    if props is not None:
-        begin.append(copy.deepcopy(props))
-    begin.append(el("w:fldChar", {"w:fldCharType": "begin"}))
-    ins = el("w:r")
-    if props is not None:
-        ins.append(copy.deepcopy(props))
+    def fld(kind: str) -> etree._Element:
+        return special_run(el("w:fldChar", {"w:fldCharType": kind}), props)
+
     it = el("w:instrText")
     it.text = f" {instr} "
     it.set(XML_SPACE, "preserve")
-    ins.append(it)
-    sep = el("w:r")
-    if props is not None:
-        sep.append(copy.deepcopy(props))
-    sep.append(el("w:fldChar", {"w:fldCharType": "separate"}))
-    res = run(result, props)
-    end = el("w:r")
-    if props is not None:
-        end.append(copy.deepcopy(props))
-    end.append(el("w:fldChar", {"w:fldCharType": "end"}))
-    return [begin, ins, sep, res, end]
+    return [fld("begin"), special_run(it, props), fld("separate"), run(result, props), fld("end")]
 
 
 class Bookmarks:
@@ -127,6 +108,11 @@ class Bookmarks:
         return el("w:bookmarkStart", {"w:id": i, "w:name": name}), el("w:bookmarkEnd", {"w:id": i})
 
 
+def num_pr(num_id: int, ilvl: int) -> etree._Element:
+    """``w:numPr``; ``num_id`` 0 switches numbering off."""
+    return el("w:numPr", None, el("w:ilvl", {"w:val": str(ilvl)}), el("w:numId", {"w:val": str(num_id)}))
+
+
 def ppr(style: str | None = None, keep_next=False, jc: str | None = None, spacing: dict | None = None,
         ind: dict | None = None, tabs: list[tuple[str, int]] | None = None, num: tuple[int, int] | None = None,
         borders: dict | None = None) -> etree._Element:
@@ -137,7 +123,7 @@ def ppr(style: str | None = None, keep_next=False, jc: str | None = None, spacin
     if keep_next:
         p.append(el("w:keepNext"))
     if num is not None:
-        p.append(el("w:numPr", None, el("w:ilvl", {"w:val": str(num[1])}), el("w:numId", {"w:val": str(num[0])})))
+        p.append(num_pr(*num))
     if borders:
         b = el("w:pBdr")
         for side in ("top", "left", "bottom", "right"):
@@ -189,11 +175,7 @@ def set_ppr(p: etree._Element, **changes) -> etree._Element:
             pp.remove(old)
         if new is not None:
             pp.append(new)
-    kids = sorted(list(pp), key=lambda c: _PPR_ORDER.index(etree.QName(c).localname) if etree.QName(c).localname in _PPR_ORDER else 99)
-    for c in list(pp):
-        pp.remove(c)
-    for c in kids:
-        pp.append(c)
+    _sort_children(pp, _PPR_ORDER)
     return pp
 
 

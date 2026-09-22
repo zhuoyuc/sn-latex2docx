@@ -69,7 +69,7 @@ def test_citation_mode_from_class_options():
 def test_macro_expansion_with_args_and_defaults():
     _, table = collect_macros(r"\newcommand{\vect}[1]{\mathbf{#1}}\newcommand{\greet}[1][World]{Hello #1}\def\foo{bar}")
     out = expand_macros(r"$\vect{v}$ \greet \greet[You] \foo \foobar \verb|\foo|", table)
-    assert out == r"$\mathbf{v}$ Hello World Hello You bar \foobar \verb|\foo|"
+    assert out == r"$\mathbf{v}$ Hello World Hello You bar{} \foobar \verb|\foo|"
 
 
 # --------------------------------------------------------------------- headings

@@ -65,7 +65,4 @@ def convert(
             postprocess(raw, output, pre.conversion, template, opts)
     finally:
         root.removeHandler(handler)
-    # de-duplicate while keeping order
-    seen = set()
-    uniq = [w for w in warnings if not (w in seen or seen.add(w))]
-    return Result(output, uniq, pre.conversion.citation_mode)
+    return Result(output, list(dict.fromkeys(warnings)), pre.conversion.citation_mode)

@@ -8,11 +8,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .scan import (
-    command_re,
+    find_commands,
     find_env,
     is_escaped,
+    map_nonverbatim,
     parse_command_args,
+    read_control_sequence,
     read_group,
+    replace_commands,
     skip_ws,
     strip_comments,
 )
@@ -107,12 +110,12 @@ def collect_macros(preamble: str, table: MacroTable | None = None) -> tuple[str,
         try:
             if kind in ("def", "gdef", "edef"):
                 i = skip_ws(preamble, i)
-                nm = re.match(r"\\([A-Za-z@]+|.)", preamble[i:])
-                if not nm:
+                cs = read_control_sequence(preamble, i)
+                if not cs:
                     pos = i
                     continue
-                name = nm.group(1)
-                i += len(nm.group(0))
+                name = cs[1:]
+                i += len(cs)
                 params_start = i
                 while i < len(preamble) and preamble[i] != "{":
                     i += 1
@@ -159,97 +162,52 @@ def _substitute(body: str, args: list[str]) -> str:
     return re.sub(r"#(\d)", repl, body)
 
 
+def _arg_spec(nargs: int, default: str | None) -> str:
+    if not nargs:
+        return ""
+    return ("o" if default is not None else "m") + "m" * (nargs - 1)
+
+
 def expand_macros(text: str, table: MacroTable, max_passes: int = 10) -> str:
     """Expand user-defined commands and environments (verbatim regions untouched)."""
     if not table.commands and not table.environments:
         return text
-    # Longest names first so \foo does not shadow \foobar (the regex also guards).
-    names = sorted(table.commands, key=len, reverse=True)
-    letter_names = [n for n in names if re.fullmatch(r"[A-Za-z@]+", n)]
-    pat = re.compile(r"\\(" + "|".join(re.escape(n) for n in letter_names) + r")(?![A-Za-z@])") if letter_names else None
 
+    def expander(macro: Macro):
+        def fn(args: list[str | None]) -> str:
+            if macro.nargs and macro.default is not None and args[0] is None:
+                args[0] = macro.default
+            expansion = _substitute(macro.body, [a or "" for a in args])
+            # a control word ending in a letter must not merge with the text after it
+            return expansion + "{}" if not macro.nargs and expansion[-1:].isalpha() else expansion
+
+        return _arg_spec(macro.nargs, macro.default), fn
+
+    handlers = {n: expander(m) for n, m in table.commands.items() if re.fullmatch(r"[A-Za-z@]+", n)}
     for _ in range(max_passes):
-        changed = False
-        if pat is not None:
-            out: list[str] = []
-            pos = 0
-            for seg_start, seg_end, verbatim in _segments(text):
-                if verbatim:
-                    continue
-                # process [seg_start, seg_end)
-                i = seg_start
-                while True:
-                    m = pat.search(text, i, seg_end)
-                    if not m:
-                        break
-                    if is_escaped(text, m.start()):
-                        i = m.end()
-                        continue
-                    macro = table.commands[m.group(1)]
-                    spec = ("o" if macro.default is not None else "m") + "m" * max(0, macro.nargs - 1) if macro.nargs else ""
-                    args, end = parse_command_args(text, m.end(), spec)
-                    if macro.nargs and macro.default is not None and args[0] is None:
-                        args[0] = macro.default
-                    if not macro.nargs:
-                        # swallow the space after a control word, as TeX does
-                        end = m.end()
-                    expansion = _substitute(macro.body, [a or "" for a in args])
-                    out.append(text[pos : m.start()])
-                    # keep a separating space if the macro ended a control word
-                    if not macro.nargs and end < len(text) and text[end : end + 1].isalpha() and expansion[-1:].isalpha():
-                        expansion += " "
-                    out.append(expansion)
-                    pos = end
-                    i = end
-                    changed = True
-            out.append(text[pos:])
-            text = "".join(out)
+        before = text
+        text = map_nonverbatim(text, lambda s: replace_commands(s, handlers))
         for name, env in table.environments.items():
             e = find_env(text, name)
             guard = 0
             while e is not None and guard < 1000:
                 guard += 1
-                spec = ("o" if env.default is not None else "m") + "m" * max(0, env.nargs - 1) if env.nargs else ""
-                args, body_start = parse_command_args(text, e.body_start, spec)
+                args, body_start = parse_command_args(text, e.body_start, _arg_spec(env.nargs, env.default))
                 if env.nargs and env.default is not None and args[0] is None:
                     args[0] = env.default
                 vals = [a or "" for a in args]
                 repl = _substitute(env.begin, vals) + text[body_start : e.body_end] + _substitute(env.end, vals)
                 text = text[: e.start] + repl + text[e.end :]
-                changed = True
                 e = find_env(text, name, e.start)
-        if not changed:
+        if text == before:
             break
     return text
-
-
-def _segments(text: str):
-    """Split text into (start, end, is_verbatim) segments."""
-    from .scan import VERBATIM_ENVS, find_env_end
-
-    pat = re.compile(r"\\begin\s*\{(" + "|".join(re.escape(e) for e in VERBATIM_ENVS) + r")\}|\\verb\*?([^A-Za-z\s])")
-    pos = 0
-    while True:
-        m = pat.search(text, pos)
-        if not m:
-            yield pos, len(text), False
-            return
-        yield pos, m.start(), False
-        if m.group(1):
-            end = find_env_end(text, m.group(1), m.end())
-            stop = end[1] if end else len(text)
-        else:
-            j = text.find(m.group(2), m.end())
-            stop = len(text) if j < 0 else j + 1
-        yield m.start(), stop, True
-        pos = stop
 
 
 @dataclass
 class Manuscript:
     path: Path
     documentclass_options: list[str]
-    documentclass: str
     preamble: str
     body: str
 
@@ -264,10 +222,7 @@ def load_manuscript(path: Path) -> Manuscript:
     end = re.search(r"\\end\s*\{document\}", raw[m.end() :])
     body = raw[m.end() : m.end() + end.start()] if end else raw[m.end() :]
     opts: list[str] = []
-    cls = ""
-    dc = command_re("documentclass").search(preamble)
-    if dc:
-        args, _ = parse_command_args(preamble, dc.end(), "om")
+    for _, _, args in find_commands(preamble, "documentclass", spec="om"):
         opts = [o.strip() for o in (args[0] or "").split(",") if o.strip()]
-        cls = (args[1] or "").strip()
-    return Manuscript(path, opts, cls, preamble, body)
+        break
+    return Manuscript(path, opts, preamble, body)

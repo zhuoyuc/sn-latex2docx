@@ -5,6 +5,7 @@ from __future__ import annotations
 import logging
 import shutil
 import subprocess
+from functools import cache
 from importlib import resources
 from pathlib import Path
 
@@ -22,6 +23,7 @@ def pandoc_executable() -> str:
     return exe
 
 
+@cache
 def pandoc_version(exe: str | None = None) -> tuple[int, ...]:
     out = subprocess.run([exe or pandoc_executable(), "--version"], capture_output=True, text=True, check=True).stdout
     first = out.splitlines()[0].split()[-1]

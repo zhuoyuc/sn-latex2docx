@@ -84,7 +84,6 @@ class Panel:
 class Image:
     source: str  # as written in \includegraphics
     options: str | None = None
-    resolved: Path | None = None
 
 
 @dataclass
@@ -127,7 +126,7 @@ class Registry:
     cites: list[tuple[str, list[str]]] = field(default_factory=list)
     bibitems: list[str] = field(default_factory=list)  # keys in order
     bib_labels: dict[str, str] = field(default_factory=dict)  # key -> \bibitem optional label
-    bookmarks: set[str] = field(default_factory=set)
+    bookmarks: set[str] = field(default_factory=set)  # lower-cased names in use
 
     def bookmark_for(self, label: str) -> str:
         """Word-safe, unique bookmark name derived from a LaTeX label."""
@@ -137,10 +136,11 @@ class Registry:
         base = base[:36]
         name = base
         k = 2
-        while name.lower() in {b.lower() for b in self.bookmarks}:
+        # Word compares bookmark names case-insensitively
+        while name.lower() in self.bookmarks:
             name = f"{base[:33]}_{k}"
             k += 1
-        self.bookmarks.add(name)
+        self.bookmarks.add(name.lower())
         return name
 
     def add_ref(self, label: str, variant: str) -> int:
@@ -164,4 +164,3 @@ class Conversion:
     citation_mode: str  # "numeric" | "author-year"
     manual_bibliography: bool = False
     equal_notes: list[str] = field(default_factory=list)  # distinct \equalcont texts
-    bib_items: list[tuple[str, str]] = field(default_factory=list)  # thebibliography (key, LaTeX)

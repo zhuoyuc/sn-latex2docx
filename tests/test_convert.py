@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from lxml import etree
 
-from sn2docx.docx.package import q
+from sn2docx.docx.package import q, text_of
 from sn2docx.docx.verify import inspect
 from sn2docx.pipeline import convert, default_template
 
@@ -46,7 +46,7 @@ def _xml(path: Path, part: str = "word/document.xml"):
 def _texts(path: Path) -> list[str]:
     body = _xml(path).find(q("w:body"))
     # "~" becomes a no-break space; compare with ordinary spaces
-    return ["".join(t.text or "" for t in p.iter(q("w:t"))).replace(" ", " ") for p in body.iter(q("w:p"))]
+    return [text_of(p).replace("\u00a0", " ") for p in body.iter(q("w:p"))]
 
 
 # ------------------------------------------------------------ structural checks
@@ -122,7 +122,7 @@ def test_reference_equation_paragraph_layout(reference):
 
 def test_header_date_and_properties(reference):
     hdr = _xml(reference.output, "word/header1.xml")
-    assert "".join(t.text or "" for t in hdr.iter(q("w:t"))) == "A PREPRINT - AUGUST 23, 2026"
+    assert text_of(hdr) == "A PREPRINT - AUGUST 23, 2026"
     core = _xml(reference.output, "docProps/core.xml")
     title = core.find("{http://purl.org/dc/elements/1.1/}title").text
     assert title == "A reference manuscript template for LaTeX to Word conversion"
@@ -130,7 +130,7 @@ def test_header_date_and_properties(reference):
 
 def test_headings_use_template_numbering(reference):
     body = _xml(reference.output).find(q("w:body"))
-    appendix = [p for p in body.iter(q("w:p")) if "Supporting derivation" in "".join(t.text or "" for t in p.iter(q("w:t")))]
+    appendix = [p for p in body.iter(q("w:p")) if "Supporting derivation" in text_of(p)]
     num = appendix[0].find(f"{q('w:pPr')}/{q('w:numPr')}/{q('w:numId')}").get(q("w:val"))
     numbering = _xml(reference.output, "word/numbering.xml")
     abs_id = numbering.find(f"{q('w:num')}[@{q('w:numId')}='{num}']").find(q("w:abstractNumId")).get(q("w:val"))

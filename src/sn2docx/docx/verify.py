@@ -13,7 +13,8 @@ from pathlib import Path
 
 from lxml import etree
 
-from .package import NS, q
+from .ooxml import para_style
+from .package import NS, q, resolve_target, text_of
 
 
 @dataclass
@@ -26,10 +27,6 @@ class Summary:
     equations: int = 0
     images: int = 0
     tables: int = 0
-
-
-def _text(el) -> str:
-    return "".join(t.text or "" for t in el.iter(q("w:t")))
 
 
 def _field_instructions(root) -> list[str]:
@@ -69,12 +66,11 @@ def inspect(path: Path) -> Summary:
     if doc is None:
         return s
 
+    story_parts = [n for n in ("word/document.xml", "word/footnotes.xml") if n in roots]
+
     # leftover markers / temporary elements
-    for n in ("word/document.xml", "word/footnotes.xml"):
-        root = roots.get(n)
-        if root is None:
-            continue
-        for t in root.iter(q("w:t"), q("m:t")):
+    for n in story_parts:
+        for t in roots[n].iter(q("w:t"), q("m:t")):
             if t.text and re.search(r"@@[A-Z]+[0-9:]*@@", t.text):
                 s.problems.append(f"{n}: leftover marker in text {t.text!r}")
         if b"urn:sn2docx:marker" in parts[n]:
@@ -83,13 +79,11 @@ def inspect(path: Path) -> Summary:
     # bookmarks: unique names and ids, starts matched by ends
     ids: dict[str, str] = {}
     all_names: set[str] = set()
-    for n in ("word/document.xml", "word/footnotes.xml"):
-        root = roots.get(n)
-        if root is None:
-            continue
+    for n in story_parts:
+        root = roots[n]
         ends = {e.get(q("w:id")) for e in root.iter(q("w:bookmarkEnd"))}
-        for b in root.iter(q("w:bookmarkStart")):
-            name, i = b.get(q("w:name")), b.get(q("w:id"))
+        for bm in root.iter(q("w:bookmarkStart")):
+            name, i = bm.get(q("w:name")), bm.get(q("w:id"))
             if name in all_names:
                 s.problems.append(f"duplicate bookmark name {name}")
             if i in ids:
@@ -101,10 +95,8 @@ def inspect(path: Path) -> Summary:
             s.bookmarks.append(name)
 
     # fields and hyperlinks must point at existing bookmarks
-    for n in ("word/document.xml", "word/footnotes.xml"):
-        root = roots.get(n)
-        if root is None:
-            continue
+    for n in story_parts:
+        root = roots[n]
         instrs = _field_instructions(root)
         if n == "word/document.xml":
             s.fields = instrs
@@ -113,9 +105,9 @@ def inspect(path: Path) -> Summary:
             if m and m.group(2) not in all_names:
                 s.problems.append(f"{m.group(1)} field points to missing bookmark {m.group(2)}")
         for h in root.iter(q("w:hyperlink")):
-            a = h.get(q("w:anchor"))
-            if a and a not in all_names:
-                s.problems.append(f"hyperlink to missing bookmark {a}")
+            a_ = h.get(q("w:anchor"))
+            if a_ and a_ not in all_names:
+                s.problems.append(f"hyperlink to missing bookmark {a_}")
 
     # relationships: every r:embed / r:id used in the body exists
     rels = roots.get("word/_rels/document.xml.rels")
@@ -127,7 +119,7 @@ def inspect(path: Path) -> Summary:
                 s.problems.append(f"dangling relationship {rid}")
     for rid, r in rel_ids.items():
         if r.get("TargetMode") != "External" and r.get("Type", "").endswith("/image"):
-            if "word/" + r.get("Target") not in media:
+            if resolve_target("word/_rels/document.xml.rels", r.get("Target", "")) not in media:
                 s.problems.append(f"image relationship {rid} targets missing part {r.get('Target')}")
 
     # numbering: every numId used exists
@@ -143,12 +135,11 @@ def inspect(path: Path) -> Summary:
     # summary
     body = doc.find(q("w:body"))
     for p in body.iter(q("w:p")):
-        st = p.find(f"{q('w:pPr')}/{q('w:pStyle')}")
-        style = st.get(q("w:val")) if st is not None else ""
+        style = para_style(p) or ""
         if style.startswith("Heading"):
-            s.headings.append((style, _text(p).strip()))
+            s.headings.append((style, text_of(p).strip()))
         elif style in ("ImageCaption", "TableCaption"):
-            s.captions.append(_text(p).strip())
+            s.captions.append(text_of(p).strip())
     s.equations = sum(1 for _ in body.iter(q("m:oMath")))
     s.images = sum(1 for _ in body.iter("{%s}inline" % NS["wp"]))
     s.tables = sum(1 for _ in body.iter(q("w:tbl")))

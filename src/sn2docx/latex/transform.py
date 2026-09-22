@@ -24,16 +24,20 @@ from ..model import (
     Table,
     marker,
 )
+from .extras import join_list
 from .scan import (
     VERBATIM_ENVS,
+    find_commands,
     find_env,
-    latex_to_plain,
     find_env_end,
+    first_arg,
     is_escaped,
+    latex_to_plain,
     parse_command_args,
     read_group,
     read_optional,
     remove_command,
+    replace_commands,
     skip_ws,
     split_top_level,
     strip_top_level,
@@ -57,6 +61,11 @@ _WALK_RE = re.compile(
     r"|(?<!\\)\$\$"
 )
 
+_FIGURE_ITEM_RE = re.compile(
+    r"\\(begin\s*\{subfigure\}|subfloat|subfigure|subcaptionbox|includegraphics|caption|label)(?![A-Za-z@])"
+)
+_DISPLAY_CLOSE_RE = re.compile(r"\\\]")
+
 _ENUM_LABELS = {r"\roman*": "i", r"\Roman*": "I", r"\alph*": "a", r"\Alph*": "A", r"\arabic*": "1"}
 
 
@@ -77,7 +86,6 @@ class Transformer:
         self.theorem_counts: dict[str, int] = {}
         self.sec = [0, 0, 0]
         self.appendix = False
-        self.appendix_count = 0
         self.eq = 0
         self.fig = 0
         self.tab = 0
@@ -189,7 +197,7 @@ class Transformer:
         if name == "algorithmic":
             return self._algorithm("\\begin{algorithmic}" + body + "\\end{algorithmic}"), resume
         if name in TABULAR_ENVS:
-            return "\n\n" + tabular_with_header_marker(full) + "\n\n", resume
+            return "\n\n" + self._tabular(full) + "\n\n", resume
         if name == "appendices":
             self._start_appendix()
             resume = body_start
@@ -261,7 +269,7 @@ class Transformer:
         if base == "alignat":
             _, i = parse_command_args(body, 0, "m")
             body = body[i:]
-        rows = [r for r in split_top_level(body)]
+        rows = split_top_level(body)
         # drop a trailing empty row produced by a final "\\"
         while len(rows) > 1 and not rows[-1].strip():
             rows.pop()
@@ -295,7 +303,8 @@ class Transformer:
                 self.eq += 1
                 number = str(self.eq)
             eq = Equation(number, tag=tag is not None)
-            content, inner_labels = _pop_all_labels(content)
+            inner_labels: list[str] = []
+            content = _pop_labels(content, inner_labels)
             if label is None and inner_labels:
                 label = inner_labels[0]
             if label:
@@ -316,11 +325,21 @@ class Transformer:
         caption: str | None = None
         main_label: str | None = None
         subcaps: list[tuple[int, str]] = []
-        pos = 0
-        pat = re.compile(r"\\(begin\s*\{subfigure\}|subfloat|subfigure|subcaptionbox|includegraphics|caption|label)(?![A-Za-z@])")
         sub_labels: list[tuple[int, str]] = []
+
+        def add_panel(inner: str, cap: str | None) -> None:
+            labs: list[str] = []
+            _pop_labels(inner, labs)
+            cap = _pop_labels(cap, labs) if cap is not None else None
+            has_caption = bool(cap and cap.strip())
+            panels.append(Panel(_images(inner), caption=has_caption))
+            if has_caption:
+                subcaps.append((len(panels) - 1, cap))
+            sub_labels.extend((len(panels) - 1, lab) for lab in labs)
+
+        pos = 0
         while True:
-            m = pat.search(body, pos)
+            m = _FIGURE_ITEM_RE.search(body, pos)
             if not m:
                 break
             if is_escaped(body, m.start()):
@@ -335,61 +354,27 @@ class Transformer:
                 inner = body[m.end() : end[0]]
                 _, i = parse_command_args(inner, 0, "om")
                 inner = inner[i:]
-                imgs = _images(inner)
-                cap = _first_command(inner, "caption", "om", 1)
-                labs: list[str] = []
-                _pop_labels(inner, labs)
-                if cap is not None:
-                    cap = _pop_labels(cap, [])
-                panels.append(Panel(imgs, caption=cap is not None))
-                if cap is not None:
-                    subcaps.append((len(panels) - 1, cap))
-                for lab in labs:
-                    sub_labels.append((len(panels) - 1, lab))
+                add_panel(inner, first_arg(inner, "caption", "om", 1))
                 pos = end[1]
             elif kind in ("subfloat", "subfigure"):
-                args, end = parse_command_args(body, m.end(), "oom")
-                inner = args[2] or ""
-                cap = args[1] if args[1] is not None else args[0]
-                labs = []
-                if cap is not None:
-                    cap = _pop_labels(cap, labs)
-                _pop_labels(inner, labs)
-                panels.append(Panel(_images(inner), caption=bool(cap and cap.strip())))
-                if cap and cap.strip():
-                    subcaps.append((len(panels) - 1, cap))
-                for lab in labs:
-                    sub_labels.append((len(panels) - 1, lab))
-                pos = end
+                args, pos = parse_command_args(body, m.end(), "oom")
+                add_panel(args[2] or "", args[1] if args[1] is not None else args[0])
             elif kind == "subcaptionbox":
-                args, end = parse_command_args(body, m.end(), "somom")
-                cap = args[1] or ""
-                labs = []
-                cap = _pop_labels(cap, labs)
-                inner = args[4] or ""
-                _pop_labels(inner, labs)
-                panels.append(Panel(_images(inner), caption=bool(cap.strip())))
-                if cap.strip():
-                    subcaps.append((len(panels) - 1, cap))
-                for lab in labs:
-                    sub_labels.append((len(panels) - 1, lab))
-                pos = end
+                args, pos = parse_command_args(body, m.end(), "somom")
+                add_panel(args[4] or "", args[1] or "")
             elif kind == "includegraphics":
-                args, end = parse_command_args(body, m.end(), "som")
+                args, pos = parse_command_args(body, m.end(), "som")
                 panels.append(Panel([Image((args[2] or "").strip(), args[1])]))
-                pos = end
             elif kind == "caption":
-                args, end = parse_command_args(body, m.end(), "som")
-                labs = []
+                args, pos = parse_command_args(body, m.end(), "som")
+                labs: list[str] = []
                 caption = _pop_labels(args[2] or "", labs)
                 if labs:
                     main_label = labs[0]
-                pos = end
             else:  # label
-                args, end = parse_command_args(body, m.end(), "m")
+                args, pos = parse_command_args(body, m.end(), "m")
                 if main_label is None:
                     main_label = (args[0] or "").strip()
-                pos = end
         number = None
         if caption is not None:
             self.fig += 1
@@ -399,10 +384,8 @@ class Transformer:
             fig.bookmark = self._bind(main_label, "figure", number or "", field=number is not None).bookmark
         k = len(self.reg.figures)
         self.reg.figures.append(fig)
-        letter = 0
-        for idx, _ in subcaps:
-            letter += 1
-            panels[idx].letter = string.ascii_lowercase[letter - 1]
+        for n, (idx, _) in enumerate(subcaps):
+            panels[idx].letter = string.ascii_lowercase[n % 26]
         for idx, lab in sub_labels:
             text = f"{number or ''}{panels[idx].letter}"
             panels[idx].bookmark = self._bind(lab, "subfigure", text).bookmark
@@ -415,9 +398,18 @@ class Transformer:
         return "".join(parts)
 
     # ------------------------------------------------------------------ tables
+    def _tabular(self, src: str) -> str:
+        """Sanitised tabular preceded by a TBLHDR marker; cell contents are walked."""
+        tab = sanitize_tabular(src)
+        body_start = _tabular_body_start(tab)
+        if body_start is None:
+            return tab
+        end = len(tab) - len("\\end{tabular}")
+        cells = self.walk(tab[body_start:end])
+        return f"{marker('TBLHDR', header_rows(tab))}\n\n{tab[:body_start]}{cells}\\end{{tabular}}"
+
     def _table(self, body: str, longtable: bool = False) -> str:
         caption = None
-        label = None
         if longtable:
             cap_m = re.search(r"\\caption(?![A-Za-z@])", body)
             if cap_m:
@@ -431,9 +423,7 @@ class Transformer:
             spec, i = parse_command_args(body, 0, "om")
             body = "\\begin{tabular}{" + (spec[1] or "") + "}" + body[i:] + "\\end{tabular}"
         else:
-            for start, end, args in _commands(body, "caption", "som"):
-                caption = args[2]
-                break
+            caption = first_arg(body, "caption", "som", 2)
         labs: list[str] = []
         if caption is not None:
             caption = _pop_labels(caption, labs)
@@ -442,7 +432,7 @@ class Transformer:
         label = labs[0] if labs else None
 
         notes: list[tuple[str | None, str]] = []
-        for _, _, args in _commands(body_wo_caption, "footnotetext", "om"):
+        for _, _, args in find_commands(body_wo_caption, "footnotetext", spec="om"):
             notes.append((args[0], args[1] or ""))
         tn = find_env(body_wo_caption, "tablenotes")
         if tn is not None:
@@ -456,7 +446,7 @@ class Transformer:
             env = find_env(body_wo_caption, TABULAR_ENVS, pos)
             if env is None:
                 break
-            tabulars.append(sanitize_tabular(body_wo_caption[env.start : env.end]))  # walk() adds TBLHDR
+            tabulars.append(self._tabular(body_wo_caption[env.start : env.end]))
             pos = env.end
         images = _images(body_wo_caption) if not tabulars else []
 
@@ -473,7 +463,7 @@ class Transformer:
         if caption is not None:
             parts.append(f"{marker('TABCAP', k)} {self.walk(caption).strip()}\n\n")
         for t in tabulars:
-            parts.append(self.walk(t) + "\n\n")
+            parts.append(t + "\n\n")
         for j, (mark, text) in enumerate(notes):
             sup = f"\\textsuperscript{{{mark.strip()}}}" if mark else ""
             parts.append(f"{marker('TABNOTE', k, j)} {sup}{self.walk(text).strip()}\n\n")
@@ -482,11 +472,10 @@ class Transformer:
 
     # -------------------------------------------------------------- algorithms
     def _algorithm(self, body: str) -> str:
-        caption = None
         labs: list[str] = []
-        for _, _, args in _commands(body, "caption", "som"):
-            caption = _pop_labels(args[2] or "", labs)
-            break
+        caption = first_arg(body, "caption", "som", 2)
+        if caption is not None:
+            caption = _pop_labels(caption, labs)
         rest = remove_command(body, "caption", "som")
         env = find_env(rest, "algorithmic")
         lines_src = ""
@@ -533,7 +522,7 @@ class Transformer:
 
         self._target = target
         inner = self.walk(s[after : end[0]])
-        self._target = saved if saved is not None else None
+        self._target = saved
         head = f"\\begin{{{name}}}" + (f"[{opt}]" if opt is not None else "")
         return f"{head}{inner}\\end{{{name}}}"
 
@@ -561,9 +550,9 @@ class Transformer:
 
 # --------------------------------------------------------------------- helpers
 def _find_display_close(s: str, i: int) -> int:
-    m = re.compile(r"\\\]").search(s, i)
+    m = _DISPLAY_CLOSE_RE.search(s, i)
     while m and is_escaped(s, m.start()):
-        m = re.compile(r"\\\]").search(s, m.end())
+        m = _DISPLAY_CLOSE_RE.search(s, m.end())
     return m.start() if m else -1
 
 
@@ -573,42 +562,19 @@ def _parse_row(row: str) -> tuple[str, str | None, bool, str | None]:
     nonumber = bool(re.search(r"\\(nonumber|notag)(?![A-Za-z])", row))
     row = re.sub(r"\\(nonumber|notag)(?![A-Za-z])", "", row)
     tag = None
-    for _, _, args in _commands(row, "tag", "sm"):
+    for _, _, args in find_commands(row, "tag", spec="sm"):
         tag = args[1]
     row = remove_command(row, "tag", "sm")
     return row.strip(), (labels[0] if labels else None), nonumber, tag
 
 
 def _pop_labels(text: str, sink: list[str]) -> str:
-    out = []
-    pos = 0
-    for start, end, args in _commands(text, "label", "m"):
-        sink.append((args[0] or "").strip())
-        out.append(text[pos:start])
-        pos = end
-    out.append(text[pos:])
-    return "".join(out)
-
-
-def _pop_all_labels(text: str) -> tuple[str, list[str]]:
-    labels: list[str] = []
-    return _pop_labels(text, labels), labels
-
-
-def _commands(text: str, name: str, spec: str):
-    from .scan import find_commands
-
-    yield from find_commands(text, name, spec)
-
-
-def _first_command(text: str, name: str, spec: str, index: int) -> str | None:
-    for _, _, args in _commands(text, name, spec):
-        return args[index] or ""
-    return None
+    """Remove ``\\label`` commands from ``text``, appending their keys to ``sink``."""
+    return replace_commands(text, {"label": ("m", lambda a: sink.append((a[0] or "").strip()) or "")})
 
 
 def _images(text: str) -> list[Image]:
-    return [Image((a[2] or "").strip(), a[1]) for _, _, a in _commands(text, "includegraphics", "som")]
+    return [Image((a[2] or "").strip(), a[1]) for _, _, a in find_commands(text, "includegraphics", spec="som")]
 
 
 def _keyvals(opt: str) -> dict[str, str]:
@@ -710,23 +676,24 @@ def clean_colspec(spec: str) -> str:
     return "".join(out) or "l"
 
 
+def _tabular_body_start(tab: str) -> int | None:
+    """Index just after ``\\begin{tabular}{spec}`` of a sanitised tabular."""
+    if not tab.startswith("\\begin{tabular}"):
+        return None
+    g = read_group(tab, len("\\begin{tabular}"))
+    return g[1] if g else None
+
+
 def header_rows(tabular: str) -> int:
-    """Rows above the first ``\\midrule`` (or the first ``\\hline`` after a row) of a sanitized tabular."""
-    m = re.match(r"\\begin\{tabular\}\{[^}]*\}", tabular)
-    body = tabular[m.end() :] if m else tabular
+    """Rows above the first ``\\midrule`` (or the first ``\\hline`` after a row) of a sanitised tabular."""
+    start = _tabular_body_start(tabular)
+    body = tabular[start:] if start is not None else tabular
     body = re.sub(r"\\end\{tabular\}\s*$", "", body)
     body = re.sub(r"^\s*\\(toprule|hline)", "", body)
     rule = re.search(r"\\(midrule|hline)(?![A-Za-z])", body)
     if not rule:
         return 0
-    rows = [r for r in split_top_level(body[: rule.start()]) if r.strip()]
-    return len(rows)
-
-
-def tabular_with_header_marker(src: str) -> str:
-    """Sanitized tabular preceded by a marker paragraph telling how many header rows it has."""
-    tab = sanitize_tabular(src)
-    return f"{marker('TBLHDR', header_rows(tab))}\n\n{tab}"
+    return sum(1 for r in split_top_level(body[: rule.start()]) if r.strip())
 
 
 def sanitize_tabular(src: str) -> str:
@@ -754,31 +721,25 @@ def _clean_table_body(body: str) -> str:
     # partial rules: the Word table gets borders under spanning header cells instead
     body = re.sub(r"\\cmidrule\s*(\([^)]*\))?\s*(\[[^\]]*\])?\s*\{[^}]*\}", "", body)
     body = re.sub(r"\\cline\s*\{[^}]*\}", "", body)
-    for name, spec in (("rowcolor", "om"), ("cellcolor", "om"), ("arrayrulecolor", "om"), ("addlinespace", "o"),
-                       ("noalign", "m"), ("rule", "omm"), ("morecmidrules", ""), ("centering", ""),
-                       ("raggedright", ""), ("raggedleft", "")):
-        body = remove_command(body, name, spec)
     # \footnotemark[1] / \tnote{a} inside cells become superscripts
     body = re.sub(r"\\footnotemark\s*\[([^\]]*)\]", r"\\textsuperscript{\1}", body)
     body = re.sub(r"\\tnote\s*\{([^}]*)\}", r"\\textsuperscript{\1}", body)
-    # \multicolumn column specs
-    out = []
-    pos = 0
-    for start, end, args in _commands(body, "multicolumn", "mmm"):
-        out.append(body[pos:start])
-        out.append("\\multicolumn{" + (args[0] or "1") + "}{" + clean_colspec(args[1] or "c") + "}{" + (args[2] or "") + "}")
-        pos = end
-    out.append(body[pos:])
-    body = "".join(out)
+    return replace_commands(body, _TABLE_BODY_COMMANDS)
+
+
+def _drop(spec: str):
+    return spec, lambda a: ""
+
+
+_TABLE_BODY_COMMANDS = {
+    **{name: _drop(spec) for name, spec in (
+        ("rowcolor", "om"), ("cellcolor", "om"), ("arrayrulecolor", "om"), ("addlinespace", "o"), ("noalign", "m"),
+        ("rule", "omm"), ("morecmidrules", ""), ("centering", ""), ("raggedright", ""), ("raggedleft", ""))},
+    # \multicolumn column specs must be sanitised too
+    "multicolumn": ("mmm", lambda a: "\\multicolumn{%s}{%s}{%s}" % (a[0] or "1", clean_colspec(a[1] or "c"), a[2] or "")),
     # \makecell{a\\b} -> a b
-    out = []
-    pos = 0
-    for start, end, args in _commands(body, "makecell", "om"):
-        out.append(body[pos:start])
-        out.append(" ".join(split_top_level(args[1] or "")))
-        pos = end
-    out.append(body[pos:])
-    return "".join(out)
+    "makecell": ("om", lambda a: " ".join(split_top_level(a[1] or ""))),
+}
 
 
 # ---------------------------------------------------------------- algorithms
@@ -808,27 +769,22 @@ _ALG_START = {
 _ALG_RE = re.compile(r"\\(" + "|".join(sorted(_ALG_START, key=len, reverse=True)) + r")(?![A-Za-z])")
 
 
+def _const(text: str):
+    return "", lambda a: text
+
+
+_COMMENT = ("m", lambda a: "\u2003\u25b7 " + (a[0] or ""))
+_ALG_INLINE = {
+    **{name: _const(r"\textbf{%s}" % name.lower()) for name in ("Return", "RETURN", "And", "AND", "Or", "OR", "Not", "NOT")},
+    **{name: _const(r"\textsc{%s}" % name.lower()) for name in ("True", "TRUE", "False", "FALSE")},
+    "Call": ("mm", lambda a: "\\textsc{%s}(%s)" % (a[0] or "", a[1] or "")),
+    "Comment": _COMMENT,
+    "COMMENT": _COMMENT,
+}
+
+
 def _alg_inline(text: str) -> str:
-    text = re.sub(r"\\(Return|RETURN)(?![A-Za-z])", r"\\textbf{return}", text)
-    text = re.sub(r"\\(And|AND)(?![A-Za-z])", r"\\textbf{and}", text)
-    text = re.sub(r"\\(Or|OR)(?![A-Za-z])", r"\\textbf{or}", text)
-    text = re.sub(r"\\(Not|NOT)(?![A-Za-z])", r"\\textbf{not}", text)
-    text = re.sub(r"\\(True|TRUE)(?![A-Za-z])", r"\\textsc{true}", text)
-    text = re.sub(r"\\(False|FALSE)(?![A-Za-z])", r"\\textsc{false}", text)
-    out, pos = [], 0
-    for start, end, args in _commands(text, "Call", "mm"):
-        out.append(text[pos:start] + "\\textsc{" + (args[0] or "") + "}(" + (args[1] or "") + ")")
-        pos = end
-    out.append(text[pos:])
-    text = "".join(out)
-    out, pos = [], 0
-    for start, end, args in _commands(text, "Comment", "m"):
-        out.append(text[pos:start] + "\u2003\u25b7 " + (args[0] or ""))
-        pos = end
-    out.append(text[pos:])
-    text = "".join(out)
-    text = re.sub(r"\\COMMENT\s*\{([^}]*)\}", "\u2003\u25b7 \\1", text)
-    return text
+    return replace_commands(text, _ALG_INLINE)
 
 
 def parse_algorithmic(src: str, numbered_every: int) -> list[tuple[int, int, str, list[str]]]:
@@ -919,45 +875,8 @@ def replace_refs(text: str, reg: Registry, math: bool = False) -> str:
             else:
                 variant = base
             pieces.append(marker("REF", reg.add_ref(key, variant)))
-        if len(pieces) > 2:
-            joined = ", ".join(pieces[:-1]) + " and " + pieces[-1]
-        else:
-            joined = " and ".join(pieces)
+        joined = join_list(pieces)
         out.append(f"\\text{{{joined}}}" if math else joined)
         pos = end
     out.append(text[pos:])
-    return "".join(out)
-
-
-def replace_refs_outside_math(text: str, reg: Registry) -> str:
-    """Apply :func:`replace_refs` to text, using ``\\text`` wrappers inside inline math."""
-    out: list[str] = []
-    i = 0
-    n = len(text)
-    buf_start = 0
-    while i < n:
-        c = text[i]
-        if c == "\\" and i + 1 < n:
-            if text[i + 1] == "(":
-                close = text.find("\\)", i + 2)
-                if close > 0:
-                    out.append(replace_refs(text[buf_start:i], reg))
-                    out.append("\\(" + replace_refs(text[i + 2 : close], reg, math=True) + "\\)")
-                    i = buf_start = close + 2
-                    continue
-            i += 2
-            continue
-        if c == "$":
-            close = i + 1
-            while close < n:
-                if text[close] == "$" and not is_escaped(text, close):
-                    break
-                close += 1
-            if close < n:
-                out.append(replace_refs(text[buf_start:i], reg))
-                out.append("$" + replace_refs(text[i + 1 : close], reg, math=True) + "$")
-                i = buf_start = close + 1
-                continue
-        i += 1
-    out.append(replace_refs(text[buf_start:], reg))
     return "".join(out)

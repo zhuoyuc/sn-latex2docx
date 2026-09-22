@@ -10,7 +10,8 @@ import copy
 import datetime as dt
 import logging
 import re
-from dataclasses import dataclass, field
+from collections import defaultdict
+from dataclasses import dataclass
 from pathlib import Path
 
 from lxml import etree
@@ -48,7 +49,6 @@ class Options:
     figure_width: float | None = 3.25  # inches; None = honour \includegraphics width
     date: str | None = None
     header_prefix: str = "A PREPRINT"
-    warnings: list[str] = field(default_factory=list)
 
 
 class PostProcessor:
@@ -60,7 +60,10 @@ class PostProcessor:
         self.opts = opts
         self.doc = pkg.xml("word/document.xml")
         self.body = self.doc.find(q("w:body"))
-        self.bm = ox.Bookmarks(1)
+        self.roots = [self.doc] + ([pkg.xml("word/footnotes.xml")] if pkg.has("word/footnotes.xml") else [])
+        self.search_dirs = list(dict.fromkeys([conv.source_dir, *conv.graphics_paths]))
+        self._media: dict[tuple, tuple[images.RasterImage, str]] = {}  # (path, options) -> (raster, rId)
+        self._bibnum = {k: n for n, k in enumerate(self.reg.bibitems, 1)}
         self.doc_pr_id = 1000
         self.our_bookmarks: set[str] = set()
         sect = self.body.find(q("w:sectPr"))
@@ -70,23 +73,25 @@ class PostProcessor:
             mar = sect.find(q("w:pgMar"))
             if sz is not None and mar is not None:
                 self.text_width = int(sz.get(q("w:w"))) - int(mar.get(q("w:left"))) - int(mar.get(q("w:right")))
-        self.heading_num = 0
         self.appendix_num = 0
 
-    def warn(self, msg: str) -> None:
+    @staticmethod
+    def warn(msg: str) -> None:
         log.warning(msg)
-        self.opts.warnings.append(msg)
 
     # ================================================================ driver
     def run(self) -> None:
-        roots = [self.doc]
-        if self.pkg.has("word/footnotes.xml"):
-            roots.append(self.pkg.xml("word/footnotes.xml"))
+        roots = self.roots
         max_id = 0
         for root in roots:
             normalise_markers(root)
-            max_id = max(max_id, _drop_pandoc_bookmarks(root))
+            kept = _remove_bookmarks(root, lambda name: name.startswith("ref-"))  # citeproc entries, renamed later
+            max_id = max([max_id, *kept])
         self.bm = ox.Bookmarks(max_id + 1)
+        # block markers never move to another paragraph before their pass runs, so index them once
+        self._markers: dict[str, list] = defaultdict(list)
+        for mk in self.body.iter(MK):
+            self._markers[mk.get("name")].append((mk, _ancestor(mk, "w:p")))
         self._setup_numbering()
         self._pass_frontmatter()
         self._pass_headings()
@@ -101,7 +106,8 @@ class PostProcessor:
         self._style_lists()
         self._style_code_blocks()
         _collapse_spaces(self.body)
-        self._clean_bookmarks(roots)
+        for root in roots:
+            _remove_bookmarks(root, lambda name: name in self.our_bookmarks)
         self._header_and_properties()
         self.pkg.drop_orphan_media()
         for root in roots:
@@ -112,15 +118,15 @@ class PostProcessor:
             etree.cleanup_namespaces(root)
 
     # ============================================================ utilities
-    def _marker_paragraphs(self, name: str, root=None) -> list[tuple[etree._Element, etree._Element]]:
-        root = root if root is not None else self.body
-        out = []
-        for mk in root.iter(MK):
-            if mk.get("name") == name:
-                p = _ancestor(mk, "w:p")
-                if p is not None:
-                    out.append((mk, p))
-        return out
+    def _marker_paragraphs(self, name: str) -> list[tuple[etree._Element, etree._Element]]:
+        return [(mk, p) for mk, p in self._markers.get(name, []) if p is not None]
+
+    def _block_markers(self, block: list[etree._Element]):
+        """Yield ``(name, args, paragraph)`` for marker paragraphs inside a block."""
+        for b in block:
+            m = b.find(MK) if b.tag == q("w:p") else None
+            if m is not None:
+                yield m.get("name"), self._args(m), b
 
     @staticmethod
     def _args(mk) -> list[int]:
@@ -205,7 +211,7 @@ class PostProcessor:
         if h_numid is None:
             self.warn("template Heading1 style has no numbering; headings will be unnumbered")
             return
-        self.heading_num = int(copy_num(h_numid))
+        heading_num = copy_num(h_numid)
         # the appendix list is the template's other heading-style list (upper letters)
         app_id = None
         for tn in tnum.findall(q("w:num")):
@@ -214,14 +220,17 @@ class PostProcessor:
             lvl0 = ta.find(q("w:lvl")) if ta is not None else None
             if lvl0 is not None and lvl0.find(q("w:pStyle")) is not None and lvl0.find(q("w:numFmt")).get(q("w:val")) == "upperLetter":
                 app_id = tn.get(q("w:numId"))
+                break
         if app_id:
             self.appendix_num = int(copy_num(app_id))
+        elif any(h.appendix for h in self.reg.headings):
+            self.warn("template has no lettered heading list; appendix headings use arabic numbers")
         # point the heading styles at the copied list
         styles = self.pkg.xml("word/styles.xml")
         for st in styles.findall(q("w:style")):
             nid = st.find(f"{q('w:pPr')}/{q('w:numPr')}/{q('w:numId')}")
             if nid is not None and nid.get(q("w:val")) == h_numid:
-                nid.set(q("w:val"), str(self.heading_num))
+                nid.set(q("w:val"), heading_num)
 
     def _style_lists(self) -> None:
         """Give pandoc's bullet lists the template's bullet glyphs and font."""
@@ -251,38 +260,39 @@ class PostProcessor:
                                                               "w:cs": "Times New Roman", "w:eastAsia": "Times New Roman"})))
 
     def _style_code_blocks(self) -> None:
-        """Code blocks: single-spaced monospace instead of the double-spaced body text they inherit."""
+        """Code blocks: single-spaced monospace via styles, not the body text they inherit.
+
+        The template's *Verbatim Char* stays as it is (it also formats e-mail addresses);
+        code runs get their own *Source Code Char* style, which pandoc's token styles
+        (``KeywordTok`` …) are re-based on, so users can restyle all code in one place.
+        """
         mono = {"w:ascii": "Courier New", "w:hAnsi": "Courier New", "w:cs": "Courier New", "w:eastAsia": "Courier New"}
+        size = (el("w:sz", {"w:val": "20"}), el("w:szCs", {"w:val": "20"}))
         styles = self.pkg.xml("word/styles.xml")
-        st = styles.find(f"{q('w:style')}[@{q('w:styleId')}='SourceCode']")
-        if st is not None:
-            for tag in ("w:pPr", "w:rPr"):
-                for old in st.findall(q(tag)):
-                    st.remove(old)
-            st.append(el("w:pPr", None, el("w:wordWrap", {"w:val": "off"}),
-                         el("w:spacing", {"w:before": "0", "w:after": "0", "w:line": "240", "w:lineRule": "auto"}),
-                         el("w:jc", {"w:val": "left"})))
-            st.append(el("w:rPr", None, el("w:rFonts", mono), el("w:sz", {"w:val": "20"}), el("w:szCs", {"w:val": "20"})))
+        by_id = {st.get(q("w:styleId")): st for st in styles.findall(q("w:style"))}
+        code = by_id.get("SourceCode")
+        if code is None:
+            return
+        for tag in ("w:pPr", "w:rPr"):
+            for old in code.findall(q(tag)):
+                code.remove(old)
+        code.append(el("w:pPr", None, el("w:wordWrap", {"w:val": "off"}),
+                       el("w:spacing", {"w:before": "0", "w:after": "120", "w:line": "240", "w:lineRule": "auto"}),
+                       el("w:contextualSpacing"), el("w:jc", {"w:val": "left"})))
+        code.append(el("w:rPr", None, el("w:rFonts", mono), *copy.deepcopy(size)))
+        char = el("w:style", {"w:type": "character", "w:customStyle": "1", "w:styleId": "SourceCodeChar"},
+                  el("w:name", {"w:val": "Source Code Char"}), el("w:basedOn", {"w:val": "DefaultParagraphFont"}),
+                  el("w:rPr", None, el("w:rFonts", mono), *copy.deepcopy(size)))
+        styles.append(char)
+        for sid, st in by_id.items():
+            based = st.find(q("w:basedOn"))
+            if sid.endswith("Tok") and based is not None and based.get(q("w:val")) == "VerbatimChar":
+                based.set(q("w:val"), "SourceCodeChar")
         for p in self.body.iter(q("w:p")):
-            if ox.para_style(p) != "SourceCode":
-                continue
-            nxt = p.getnext()
-            if nxt is None or ox.para_style(nxt) != "SourceCode":
-                ox.set_ppr(p, spacing=el("w:spacing", {"w:before": "0", "w:after": "120", "w:line": "240", "w:lineRule": "auto"}))
-            for r in p.iter(q("w:r")):
-                rp = r.find(q("w:rPr"))
-                new = ox.rpr(base=rp, size=20) if rp is not None else ox.rpr(size=20)
-                for f in new.findall(q("w:rFonts")) + new.findall(q("w:sz")) + new.findall(q("w:szCs")):
-                    new.remove(f)
-                pos = 1 if new.find(q("w:rStyle")) is not None else 0
-                new.insert(pos, el("w:rFonts", mono))
-                new.append(el("w:sz", {"w:val": "20"}))
-                new.append(el("w:szCs", {"w:val": "20"}))
-                ox._order_rpr(new)
-                if rp is not None:
-                    r.replace(rp, new)
-                else:
-                    r.insert(0, new)
+            if ox.para_style(p) == "SourceCode":
+                for rs in p.iter(q("w:rStyle")):
+                    if rs.get(q("w:val")) == "VerbatimChar":
+                        rs.set(q("w:val"), "SourceCodeChar")
 
     # ========================================================== front matter
     def _pass_frontmatter(self) -> None:
@@ -294,8 +304,9 @@ class PostProcessor:
                 found.setdefault((mk.get("name"), mk.get("args")), p)
         if not found:
             return
-        start = next(found[k] for k in (("FMTITLE", ""), ("FMAUTHOR", "0")) if found.get(k) is not None) \
-            if any(found.get(k) is not None for k in (("FMTITLE", ""), ("FMAUTHOR", "0"))) else next(iter(found.values()))
+        # lxml elements are falsy when childless, so test "is not None" explicitly
+        start = next((found[k] for k in (("FMTITLE", ""), ("FMAUTHOR", "0")) if found.get(k) is not None),
+                     next(iter(found.values())))
         end = found.get(("FMEND", ""))
         new: list[etree._Element] = []
 
@@ -359,9 +370,9 @@ class PostProcessor:
             new.append(ox.paragraph(ox.ppr("FirstParagraph"), [ox.run("Keywords:", bold=True), ox.run(" "), *kw]))
 
         # replace the original block (start marker .. end marker) by the new paragraphs
-        i0 = list(self.body).index(start)
-        i1 = list(self.body).index(end) if end is not None else i0
-        _replace_block(list(self.body)[i0 : i1 + 1], new)
+        i0 = self.body.index(start)
+        i1 = self.body.index(end) if end is not None else i0
+        _replace_block(self.body[i0 : i1 + 1], new)
 
     # ============================================================== headings
     def _pass_headings(self) -> None:
@@ -373,10 +384,9 @@ class PostProcessor:
             for c in ox.content_children(p):
                 p.remove(c)
             if not h.numbered:
-                ox.set_ppr(p, numPr=el("w:numPr", None, el("w:ilvl", {"w:val": "0"}), el("w:numId", {"w:val": "0"})))
+                ox.set_ppr(p, numPr=ox.num_pr(0, 0))
             elif h.appendix and self.appendix_num:
-                ox.set_ppr(p, numPr=el("w:numPr", None, el("w:ilvl", {"w:val": str(h.level - 1)}),
-                                       el("w:numId", {"w:val": str(self.appendix_num)})))
+                ox.set_ppr(p, numPr=ox.num_pr(self.appendix_num, h.level - 1))
             content = [ox.run(" ")] + items if h.numbered else items
             for c in self._bookmark_wrap(h.bookmark, content):
                 p.append(c)
@@ -414,19 +424,26 @@ class PostProcessor:
             p.getparent().remove(p)
 
     # =============================================================== figures
-    def _image_paragraphs(self, panels, style: str, multi: bool) -> list[etree._Element]:
+    def _raster(self, path: Path, options: str | None) -> tuple[images.RasterImage, str]:
+        """Convert and embed an image once, however often it is included."""
+        key = (path, options)
+        if key not in self._media:
+            raster = images.load_image(path, options)
+            self._media[key] = (raster, self.pkg.add_media(raster.data, raster.ext))
+        return self._media[key]
+
+    def _image_paragraphs(self, panels, style: str) -> list[etree._Element]:
         out = []
-        search = [self.conv.source_dir, *self.conv.graphics_paths]
         for panel in panels:
             for img in panel.images:
-                path = images.resolve(img.source, search)
+                path = images.resolve(img.source, self.search_dirs)
                 if path is None:
                     self.warn(f"image not found: {img.source}")
                     out.append(ox.paragraph(ox.ppr(style, keep_next=True, jc="center"),
                                             [ox.run(f"[missing figure: {img.source}]", bold=True)]))
                     continue
                 try:
-                    raster = images.load_image(path, img.options)
+                    raster, rid = self._raster(path, img.options)
                 except Exception as exc:  # conversion failure: keep going with a placeholder
                     self.warn(f"cannot convert image {path}: {exc}")
                     out.append(ox.paragraph(ox.ppr(style, keep_next=True, jc="center"),
@@ -442,7 +459,6 @@ class PostProcessor:
                 max_h = int(8.0 * EMU_PER_IN)
                 if cy > max_h:
                     cx, cy = int(cx * max_h / cy), max_h
-                rid = self.pkg.add_media(raster.data, raster.ext)
                 self.doc_pr_id += 1
                 run = ox.drawing(rid, cx, cy, self.doc_pr_id, path.name, img.source)
                 out.append(ox.paragraph(ox.ppr(style, keep_next=True, jc="center"), [run]))
@@ -455,18 +471,15 @@ class PostProcessor:
             block = self._block(p, "FIGEND", k)
             subcaps: dict[int, etree._Element] = {}
             caption = None
-            for b in block:
-                m = b.find(MK) if b.tag == q("w:p") else None
-                if m is None:
-                    continue
-                if m.get("name") == "SUBCAP":
-                    subcaps[self._args(m)[1]] = b
-                elif m.get("name") == "FIGCAP":
+            for name, args, b in self._block_markers(block):
+                if name == "SUBCAP":
+                    subcaps[args[1]] = b
+                elif name == "FIGCAP":
                     caption = b
             multi = len(fig.panels) > 1 or bool(subcaps)
             new: list[etree._Element] = []
             for idx, panel in enumerate(fig.panels):
-                new += self._image_paragraphs([panel], "Compact" if multi else "CaptionedFigure", multi)
+                new += self._image_paragraphs([panel], "Compact" if multi else "CaptionedFigure")
                 if idx in subcaps:
                     runs = [ox.run(f"({panel.letter}) ")] + self._content_without_marker(subcaps[idx])
                     new.append(ox.paragraph(ox.ppr("Compact", keep_next=True, jc="center"),
@@ -483,7 +496,6 @@ class PostProcessor:
     # ================================================================ tables
     def _style_table(self, tbl: etree._Element, caption_text: str | None = None) -> None:
         old = tbl.find(q("w:tblPr"))
-        look = old.find(q("w:tblLook")) if old is not None else None
         rows = tbl.findall(q("w:tr"))
         header_rows = [r for r in rows if r.find(f"{q('w:trPr')}/{q('w:tblHeader')}") is not None]
         new = el("w:tblPr", None,
@@ -500,7 +512,6 @@ class PostProcessor:
         first_row = "1" if len(header_rows) == 1 else "0"
         new.append(el("w:tblLook", {"w:firstRow": first_row, "w:lastRow": "0", "w:firstColumn": "0", "w:lastColumn": "0",
                                     "w:noHBand": "0", "w:noVBand": "0", "w:val": "0020" if first_row == "1" else "0000"}))
-        del look
         if caption_text:
             new.append(el("w:tblCaption", {"w:val": caption_text[:250]}))
         if old is not None:
@@ -558,19 +569,13 @@ class PostProcessor:
             k = self._args(mk)[0]
             tab = self.reg.tables[k]
             block = self._block(p, "TABEND", k)
+            tables = [b for b in block if b.tag == q("w:tbl")]
             caption = None
             notes = []
-            tables = []
-            for b in block:
-                if b.tag == q("w:tbl"):
-                    tables.append(b)
-                    continue
-                m = b.find(MK) if b.tag == q("w:p") else None
-                if m is None:
-                    continue
-                if m.get("name") == "TABCAP":
+            for name, _, b in self._block_markers(block):
+                if name == "TABCAP":
                     caption = b
-                elif m.get("name") == "TABNOTE":
+                elif name == "TABNOTE":
                     notes.append(b)
             cap_runs = self._content_without_marker(caption) if caption is not None else []
             cap_text = f"Table {tab.number}: {ox.plain_text(cap_runs)}" if tab.number else None
@@ -580,7 +585,7 @@ class PostProcessor:
                 handled.add(t)
                 new.append(t)
             if tab.panels:
-                new += self._image_paragraphs(tab.panels, "CaptionedFigure", False)
+                new += self._image_paragraphs(tab.panels, "CaptionedFigure")
             for n in notes:
                 new.append(ox.paragraph(
                     ox.ppr("Compact", keep_next=caption is not None, jc="left",
@@ -606,14 +611,11 @@ class PostProcessor:
             block = self._block(p, "ALGEND", k)
             caption = None
             lines = []
-            for b in block:
-                m = b.find(MK) if b.tag == q("w:p") else None
-                if m is None:
-                    continue
-                if m.get("name") == "ALGCAP":
+            for name, args, b in self._block_markers(block):
+                if name == "ALGCAP":
                     caption = b
-                elif m.get("name") == "ALGLINE":
-                    lines.append((self._args(m), b))
+                elif name == "ALGLINE":
+                    lines.append((args, b))
             new: list[etree._Element] = []
             if caption is not None:
                 bold = ox.rpr(bold=True)
@@ -674,29 +676,21 @@ class PostProcessor:
                 p.remove(c)
             for c in self._bookmark_wrap(new_name, content):
                 p.append(c)
-            ox.set_ppr(p, pStyle=el("w:pStyle", {"w:val": "BodyText"}),
-                       ind=el("w:ind", {"w:left": "567", "w:hanging": "567"}), jc=el("w:jc", {"w:val": "left"}))
+            p.replace(p.find(q("w:pPr")), _bib_ppr())
         # the References heading pandoc inserted right before the list
         first = bib_paras[0]
         cur = first.getprevious()
         while cur is not None and cur.tag != q("w:p"):
             cur = cur.getprevious()
         if cur is not None and (ox.para_style(cur) or "").startswith("Heading"):
-            ox.set_ppr(cur, numPr=el("w:numPr", None, el("w:ilvl", {"w:val": "0"}), el("w:numId", {"w:val": "0"})))
-        roots = [self.doc] + ([self.pkg.xml("word/footnotes.xml")] if self.pkg.has("word/footnotes.xml") else [])
-        for root in roots:
+            ox.set_ppr(cur, numPr=ox.num_pr(0, 0))
+        for root in self.roots:
             for h in root.iter(q("w:hyperlink")):
                 anchor = h.get(q("w:anchor"))
                 if anchor in mapping:
                     h.set(q("w:anchor"), mapping[anchor])
                     for r in h.findall(q("w:r")):
-                        rp = r.find(q("w:rPr"))
-                        base = rp if rp is not None else None
-                        new = ox.rpr(style="Hyperlink", color="000000", base=_strip_color(base))
-                        if rp is not None:
-                            r.replace(rp, new)
-                        else:
-                            r.insert(0, new)
+                        _set_rpr(r, ox.rpr(style="Hyperlink", color="000000", base=_strip_color(r.find(q("w:rPr")))))
 
     # ============================================================ inline marks
     def _pass_inline(self, root) -> None:
@@ -722,29 +716,28 @@ class PostProcessor:
                 t.text = MARKER_RE.sub(lambda m: self._marker_text(m.group(1), m.group(2)), t.text)
 
     def _marker_text(self, name: str, args: str) -> str:
-        if name == "REF" and args:
-            label, variant = self.reg.refs[int(args)]
-            lab = self.reg.labels.get(label)
-            txt = lab.text if lab else "??"
-            return f"({txt})" if variant == "eq" or (lab is not None and lab.kind == "equation" and variant != "ref") else txt
-        return ""
+        """Plain-text rendering of a REF marker (used where fields cannot go, e.g. inside math)."""
+        if name != "REF" or not args:
+            return ""
+        label, variant = self.reg.refs[int(args)]
+        lab = self.reg.labels.get(label)
+        if lab is None:
+            return "??"
+        prefix, parens = format_ref(lab, variant)
+        number = f"({lab.text})" if parens else lab.text
+        return f"{prefix} {number}" if prefix else number
 
     def _ref_runs(self, i: int, base) -> list[etree._Element]:
         label, variant = self.reg.refs[i]
         lab: Label | None = self.reg.labels.get(label)
         if lab is None:
             self.warn(f"undefined reference: {label}")
-            return [ox.run("??", base, ) if base is not None else ox.run("??", bold=True)]
+            return [ox.run("??", base) if base is not None else ox.run("??", bold=True)]
         hl = ox.rpr(style="Hyperlink", base=_strip_color(base))
         runs: list[etree._Element] = []
-        named = variant.rstrip("+") in ("cref", "Cref")
-        if named:
-            names = CREF_NAMES.get(lab.kind, (lab.kind, lab.kind.capitalize()))
-            name = names[0] if variant.startswith("cref") else names[1]
-            if variant.endswith("+"):
-                name = CREF_PLURALS.get(name, name + "s")
-            runs.append(ox.run(f"{name} ", hl))
-        parens = variant == "eq" or ((named or variant == "bare") and lab.kind == "equation")
+        prefix, parens = format_ref(lab, variant)
+        if prefix:
+            runs.append(ox.run(f"{prefix} ", hl))
         if parens:
             runs.append(ox.run("(", hl))
         if lab.field and lab.bookmark:
@@ -766,8 +759,8 @@ class PostProcessor:
         plain = copy.deepcopy(base) if base is not None else None
         nums = []
         for k in keys:
-            if k in self.reg.bibitems:
-                nums.append(self.reg.bibitems.index(k) + 1)
+            if k in self._bibnum:
+                nums.append(self._bibnum[k])
             else:
                 self.warn(f"undefined citation: {k}")
         if self.conv.citation_mode == "author-year":
@@ -799,19 +792,6 @@ class PostProcessor:
             runs.append(h)
         runs.append(ox.run("]", plain))
         return runs
-
-    # ============================================================= bookmarks
-    def _clean_bookmarks(self, roots) -> None:
-        """Drop the remaining pandoc bookmarks (citeproc's ref-KEY), keeping ours."""
-        for root in roots:
-            removed = set()
-            for s in list(root.iter(q("w:bookmarkStart"))):
-                if s.get(q("w:name")) not in self.our_bookmarks:
-                    removed.add(s.get(q("w:id")))
-                    s.getparent().remove(s)
-            for e in list(root.iter(q("w:bookmarkEnd"))):
-                if e.get(q("w:id")) in removed:
-                    e.getparent().remove(e)
 
     # ============================================================ properties
     def _header_and_properties(self) -> None:
@@ -931,16 +911,34 @@ def _cell_border(tc: etree._Element, side: str, sz: int) -> None:
     b.append(el(f"w:{side}", {"w:val": "single", "w:sz": str(sz), "w:space": "0", "w:color": "000000"}))
 
 
-def _resize(r: etree._Element, size: int) -> etree._Element:
-    if r.tag != q("w:r"):
-        return r
-    rp = r.find(q("w:rPr"))
-    new = ox.rpr(size=size, base=rp)
-    if rp is not None:
-        r.replace(rp, new)
-    else:
+def format_ref(lab: Label, variant: str) -> tuple[str, bool]:
+    """Type-name prefix (may be empty) and whether the number is parenthesised.
+
+    ``variant`` comes from :func:`sn2docx.latex.transform.replace_refs`: ``ref``,
+    ``eq``, ``cref``/``Cref`` (``+`` suffix: plural) or ``bare``.
+    """
+    prefix = ""
+    if variant.rstrip("+") in ("cref", "Cref"):
+        names = CREF_NAMES.get(lab.kind, (lab.kind, lab.kind.capitalize()))
+        prefix = names[0] if variant.startswith("cref") else names[1]
+        if variant.endswith("+"):
+            prefix = CREF_PLURALS.get(prefix, prefix + "s")
+    parens = variant == "eq" or (variant != "ref" and lab.kind == "equation")
+    return prefix, parens
+
+
+def _set_rpr(r: etree._Element, new: etree._Element | None) -> etree._Element:
+    """Replace (or insert) a run's properties."""
+    old = r.find(q("w:rPr"))
+    if old is not None:
+        r.remove(old)
+    if new is not None:
         r.insert(0, new)
     return r
+
+
+def _resize(r: etree._Element, size: int) -> etree._Element:
+    return _set_rpr(r, ox.rpr(size=size, base=r.find(q("w:rPr")))) if r.tag == q("w:r") else r
 
 
 def _bib_ppr() -> etree._Element:
@@ -948,12 +946,9 @@ def _bib_ppr() -> etree._Element:
 
 
 def _prev_rpr(mk: etree._Element):
-    prev = mk.getprevious()
-    while prev is not None and prev.tag != q("w:r"):
-        prev = prev.getprevious()
-    if prev is None:
-        return None
-    rp = prev.find(q("w:rPr"))
+    """Formatting of the run before a marker, minus character style and super/subscript."""
+    prev = next(mk.itersiblings(q("w:r"), preceding=True), None)
+    rp = prev.find(q("w:rPr")) if prev is not None else None
     if rp is None:
         return None
     rp = copy.deepcopy(rp)
@@ -1010,20 +1005,20 @@ def _collapse_spaces(body: etree._Element) -> None:
             prev_text = text
 
 
-def _drop_pandoc_bookmarks(root: etree._Element) -> int:
-    """Remove pandoc's bookmarks except citeproc's ``ref-KEY``; return the largest id kept."""
+def _remove_bookmarks(root: etree._Element, keep) -> list[int]:
+    """Remove bookmarks whose name fails ``keep(name)``; return the ids of those kept."""
     removed = set()
-    max_id = 0
+    kept = []
     for s in list(root.iter(q("w:bookmarkStart"))):
-        if (s.get(q("w:name")) or "").startswith("ref-"):
-            max_id = max(max_id, int(s.get(q("w:id"), "0")))
+        if keep(s.get(q("w:name")) or ""):
+            kept.append(int(s.get(q("w:id"), "0")))
         else:
             removed.add(s.get(q("w:id")))
             s.getparent().remove(s)
     for e in list(root.iter(q("w:bookmarkEnd"))):
         if e.get(q("w:id")) in removed:
             e.getparent().remove(e)
-    return max_id
+    return kept
 
 
 def _set_child(parent: etree._Element, tag: str, text: str) -> etree._Element:
@@ -1034,10 +1029,8 @@ def _set_child(parent: etree._Element, tag: str, text: str) -> etree._Element:
     return e
 
 
-def postprocess(pandoc_docx: Path, out: Path, conv: Conversion, template: Path, opts: Options) -> list[str]:
+def postprocess(pandoc_docx: Path, out: Path, conv: Conversion, template: Path, opts: Options) -> None:
+    """Rewrite pandoc's docx into the template layout; problems are reported through logging."""
     pkg = Package.open(pandoc_docx)
-    tpl = Package.open(template)
-    pp = PostProcessor(pkg, conv, tpl, opts)
-    pp.run()
+    PostProcessor(pkg, conv, Package.open(template), opts).run()
     pkg.save(out)
-    return opts.warnings

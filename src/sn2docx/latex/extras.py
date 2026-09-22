@@ -10,7 +10,18 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-from .scan import VERBATIM_ENVS, find_env_end, is_escaped, parse_command_args, read_group, skip_ws
+from .scan import (
+    ENV_BEGIN_RE,
+    command_re,
+    find_env_end,
+    is_escaped,
+    map_nonverbatim,
+    parse_command_args,
+    read_control_sequence,
+    read_group,
+    replace_commands,
+    skip_ws,
+)
 
 NNBSP = "\u202f"  # narrow no-break space: number-unit and unit-unit separator
 MINUS = "\u2212"
@@ -21,55 +32,35 @@ MATH_ENVS = (
 
 
 # ------------------------------------------------------------ math segmentation
-def map_math_aware(s: str, text_fn, math_fn) -> str:
-    """Apply ``text_fn`` to text runs and ``math_fn`` to math content, skipping verbatim."""
+def _map_math(s: str, text_fn, math_fn) -> str:
+    """Split verbatim-free text into text and math runs (``$``, ``$$``, ``\\(``, ``\\[``, math envs)."""
     out: list[str] = []
-    pos = 0
-    buf = 0
+    pos = buf = 0
     n = len(s)
-    begin_re = re.compile(r"\\begin\s*\{([^}]*)\}")
     while pos < n:
         c = s[pos]
         if c == "\\":
-            m = begin_re.match(s, pos)
-            if m and (m.group(1) in VERBATIM_ENVS or m.group(1) in MATH_ENVS):
+            m = ENV_BEGIN_RE.match(s, pos)
+            if m and m.group(1) in MATH_ENVS:
                 end = find_env_end(s, m.group(1), m.end())
-                if end is None:
-                    pos = m.end()
-                    continue
-                out.append(text_fn(s[buf:pos]))
-                if m.group(1) in VERBATIM_ENVS:
-                    out.append(s[pos : end[1]])
-                else:
+                if end is not None:
+                    out.append(text_fn(s[buf:pos]))
                     out.append(s[pos : m.end()] + math_fn(s[m.end() : end[0]]) + s[end[0] : end[1]])
-                pos = buf = end[1]
-                continue
-            mv = re.match(r"\\verb\*?([^A-Za-z\s])", s[pos:])
-            if mv:
-                j = s.find(mv.group(1), pos + len(mv.group(0)))
-                stop = n if j < 0 else j + 1
+                    pos = buf = end[1]
+                    continue
+            close = {"(": "\\)", "[": "\\]"}.get(s[pos + 1 : pos + 2])
+            j = s.find(close, pos + 2) if close and not is_escaped(s, pos) else -1
+            if j > 0:
                 out.append(text_fn(s[buf:pos]))
-                out.append(s[pos:stop])
-                pos = buf = stop
-                continue
-            for open_, close in (("\\(", "\\)"), ("\\[", "\\]")):
-                if s.startswith(open_, pos) and not is_escaped(s, pos):
-                    j = s.find(close, pos + 2)
-                    if j > 0:
-                        out.append(text_fn(s[buf:pos]))
-                        out.append(open_ + math_fn(s[pos + 2 : j]) + close)
-                        pos = buf = j + 2
-                        break
+                out.append(s[pos : pos + 2] + math_fn(s[pos + 2 : j]) + close)
+                pos = buf = j + 2
             else:
                 pos += 2
             continue
         if c == "$":
-            dbl = s.startswith("$$", pos)
-            delim = "$$" if dbl else "$"
+            delim = "$$" if s.startswith("$$", pos) else "$"
             j = pos + len(delim)
-            while j < n:
-                if s.startswith(delim, j) and not is_escaped(s, j):
-                    break
+            while j < n and not (s.startswith(delim, j) and not is_escaped(s, j)):
                 j += 1
             if j < n:
                 out.append(text_fn(s[buf:pos]))
@@ -81,28 +72,9 @@ def map_math_aware(s: str, text_fn, math_fn) -> str:
     return "".join(out)
 
 
-def _replace_commands(s: str, table: dict[str, tuple[str, callable]]) -> str:
-    """Replace ``\\name`` (with args per spec) by ``fn(args)`` for each entry of ``table``."""
-    if not table:
-        return s
-    pat = re.compile(r"\\(" + "|".join(sorted(map(re.escape, table), key=len, reverse=True)) + r")(?![A-Za-z@])")
-    out = []
-    pos = 0
-    while True:
-        m = pat.search(s, pos)
-        if not m:
-            break
-        if is_escaped(s, m.start()):
-            out.append(s[pos : m.end()])
-            pos = m.end()
-            continue
-        spec, fn = table[m.group(1)]
-        args, end = parse_command_args(s, m.end(), spec)
-        out.append(s[pos : m.start()])
-        out.append(fn(args))
-        pos = end
-    out.append(s[pos:])
-    return "".join(out)
+def map_math_aware(s: str, text_fn, math_fn) -> str:
+    """Apply ``text_fn`` to text runs and ``math_fn`` to math content, skipping verbatim."""
+    return map_nonverbatim(s, lambda seg: _map_math(seg, text_fn, math_fn))
 
 
 # ---------------------------------------------------------------------- siunitx
@@ -130,7 +102,6 @@ UNITS = {
     "umol": "\u00b5mol", "kJ": "kJ", "MPa": "MPa", "GPa": "GPa", "kPa": "kPa", "eV": "eV", "keV": "keV",
     "MeV": "MeV", "GeV": "GeV",
 }
-_UNIT_TOKEN = re.compile(r"\\([A-Za-z]+)|([A-Za-z\u00b5\u00b0\u03a9%]+)|\^\s*\{?(-?[0-9.]+)\}?|([./~ ])")
 
 
 def _unit_parts(unit: str) -> list[tuple[str, str]]:
@@ -280,57 +251,42 @@ def _qty(num: str, unit: str, math: bool) -> str:
     return n + ("\\," if math else NNBSP) + u
 
 
-def _list(items: list[str]) -> str:
-    if len(items) <= 1:
-        return "".join(items)
-    if len(items) == 2:
-        return f"{items[0]} and {items[1]}"
+def join_list(items: list[str]) -> str:
+    """``a``, ``a and b``, ``a, b and c``."""
+    if len(items) <= 2:
+        return " and ".join(items)
     return ", ".join(items[:-1]) + " and " + items[-1]
 
 
 def siunitx_table(math: bool):
-    def wrap(s: str) -> str:
-        return s
+    times = " \\times " if math else " \u00d7 "
 
-    def qty(a):
-        return wrap(_qty(a[1] or "", a[2] or "", math))
+    def qty(x: str, unit: str) -> str:
+        return _qty(x, unit, math)
 
-    def qlist(a):
-        return wrap(_list([_qty(x, a[2] or "", math) for x in (a[1] or "").split(";")]))
+    def num(x: str, _unit: str = "") -> str:
+        return format_number(x, math)
 
-    def nlist(a):
-        return wrap(_list([format_number(x, math) for x in (a[1] or "").split(";")]))
+    def listed(fmt, unit_at):
+        return lambda a: join_list([fmt(x, a[unit_at] or "") for x in (a[1] or "").split(";")])
 
-    def qrange(a):
-        return wrap(f"{_qty(a[1] or '', a[3] or '', math)} to {_qty(a[2] or '', a[3] or '', math)}")
+    def ranged(fmt, unit_at):
+        return lambda a: f"{fmt(a[1] or '', a[unit_at] or '')} to {fmt(a[2] or '', a[unit_at] or '')}"
 
-    def nrange(a):
-        return wrap(f"{format_number(a[1] or '', math)} to {format_number(a[2] or '', math)}")
-
-    def qproduct(a):
-        times = " \\times " if math else " \u00d7 "
-        return wrap(times.join(_qty(x, a[2] or "", math) for x in re.split(r"\s*x\s*", (a[1] or "").strip())))
-
-    def nproduct(a):
-        times = " \\times " if math else " \u00d7 "
-        return wrap(times.join(format_number(x, math) for x in re.split(r"\s*x\s*", (a[1] or "").strip())))
-
-    def unit(a):
-        return wrap(format_unit(a[1] or "", math))
-
-    def num(a):
-        return wrap(format_number(a[1] or "", math))
+    def product(fmt, unit_at):
+        return lambda a: times.join(fmt(x, a[unit_at] or "") for x in re.split(r"\s*x\s*", (a[1] or "").strip()))
 
     def ang(a):
-        parts = (a[1] or "").split(";")
         marks = ["\u00b0", "\u2032", "\u2033"]
-        return wrap("".join(format_number(p, math) + m for p, m in zip(parts, marks) if p.strip()))
+        return "".join(format_number(p, math) + m for p, m in zip((a[1] or "").split(";"), marks) if p.strip())
 
+    quantity = ("omm", lambda a: qty(a[1] or "", a[2] or ""))
+    unit = ("om", lambda a: format_unit(a[1] or "", math))
     return {
-        "SI": ("omm", qty), "qty": ("omm", qty), "si": ("om", unit), "unit": ("om", unit), "num": ("om", num),
-        "SIlist": ("omm", qlist), "qtylist": ("omm", qlist), "numlist": ("om", nlist),
-        "SIrange": ("ommm", qrange), "qtyrange": ("ommm", qrange), "numrange": ("omm", nrange),
-        "qtyproduct": ("omm", qproduct), "numproduct": ("om", nproduct), "ang": ("om", ang),
+        "SI": quantity, "qty": quantity, "si": unit, "unit": unit, "num": ("om", lambda a: num(a[1] or "")),
+        "SIlist": ("omm", listed(qty, 2)), "qtylist": ("omm", listed(qty, 2)), "numlist": ("om", listed(num, 1)),
+        "SIrange": ("ommm", ranged(qty, 3)), "qtyrange": ("ommm", ranged(qty, 3)), "numrange": ("omm", ranged(num, 0)),
+        "qtyproduct": ("omm", product(qty, 2)), "numproduct": ("om", product(num, 0)), "ang": ("om", ang),
         "sisetup": ("m", lambda a: ""),
     }
 
@@ -414,9 +370,9 @@ def mhchem_to_math(formula: str) -> str:
             continue
         if c == "\\":
             flush()
-            m = re.match(r"\\[A-Za-z]+|\\.", s[i:])
-            out.append(m.group(0) + " ")
-            i += len(m.group(0))
+            cs = read_control_sequence(s, i) or "\\"
+            out.append(cs + " ")
+            i += len(cs)
             continue
         flush()
         out.append(c)
@@ -434,11 +390,15 @@ def mhchem_table(math: bool):
 
 
 # ------------------------------------------------------------ package rewriting
+_TEXT_TABLE = {**siunitx_table(False), **mhchem_table(False)}
+_MATH_TABLE = {**siunitx_table(True), **mhchem_table(True)}
+
+
 def rewrite_packages(body: str) -> str:
     """Rewrite siunitx and mhchem commands everywhere, math-aware."""
-    text_table = {**siunitx_table(False), **mhchem_table(False)}
-    math_table = {**siunitx_table(True), **mhchem_table(True)}
-    return map_math_aware(body, lambda t: _replace_commands(t, text_table), lambda m: _replace_commands(m, math_table))
+    if not command_re(*_TEXT_TABLE).search(body):
+        return body
+    return map_math_aware(body, lambda t: replace_commands(t, _TEXT_TABLE), lambda m: replace_commands(m, _MATH_TABLE))
 
 
 # ------------------------------------------------------- textual numeric cites
@@ -450,23 +410,14 @@ def read_bib_authors(files: list[Path]) -> dict[str, tuple[list[str], str]]:
             text = f.read_text(encoding="utf-8", errors="replace")
         except OSError:
             continue
-        for m in re.finditer(r"@\s*(\w+)\s*\{\s*([^,\s]+)\s*,", text):
+        for m in re.finditer(r"@\s*(\w+)\s*(\{)\s*([^,\s]+)\s*,", text):
             if m.group(1).lower() in ("string", "comment", "preamble"):
                 continue
-            start = m.end()
-            depth = 1
-            j = m.end() - 1
-            while j + 1 < len(text) and depth > 0:
-                j += 1
-                if text[j] == "{":
-                    depth += 1
-                elif text[j] == "}":
-                    depth -= 1
-            entry = text[start:j]
-            fields = _bib_fields(entry)
+            group = read_group(text, m.start(2))
+            fields = _bib_fields(group[0] if group else text[m.end() :])
             names = fields.get("author") or fields.get("editor") or ""
             year = re.sub(r"[{}]", "", fields.get("year", ""))
-            out[m.group(2)] = ([_family(n) for n in re.split(r"\s+and\s+", names) if n.strip()], year)
+            out[m.group(3)] = ([_family(n) for n in re.split(r"\s+and\s+", names) if n.strip()], year)
     return out
 
 
@@ -511,38 +462,31 @@ def author_text(names: list[str]) -> str:
     return f"{names[0]} et al."
 
 
-_TEXTUAL_RE = re.compile(r"\\(citet|Citet|citeauthor|Citeauthor|citeyear|citeyearpar|citealt)\*?(?![A-Za-z@])")
-
-
 def rewrite_textual_citations(body: str, bib: dict[str, tuple[list[str], str]]) -> str:
     """Numeric mode: ``\\citet{k}`` -> ``Name et al.~\\cite{k}`` (pandoc prints only the number)."""
-    out: list[str] = []
-    pos = 0
-    while True:
-        m = _TEXTUAL_RE.search(body, pos)
-        if not m:
-            break
-        if is_escaped(body, m.start()):
-            out.append(body[pos : m.end()])
-            pos = m.end()
-            continue
-        args, end = parse_command_args(body, m.end(), "oom")
-        keys = [k.strip() for k in (args[2] or "").split(",") if k.strip()]
-        cmd = m.group(1).lower()
-        pieces = []
-        for k in keys:
-            names, year = bib.get(k, ([], ""))
-            who = author_text(names) if names else k
-            if cmd == "citeauthor":
-                pieces.append(who)
-            elif cmd == "citeyear":
-                pieces.append(year)
-            elif cmd == "citeyearpar":
-                pieces.append(f"({year})")
-            else:
-                note = f"[{args[1]}]" if args[1] else ""
-                pieces.append(f"{who}~\\cite{note}{{{k}}}")
-        out.append(body[pos : m.start()] + ", ".join(pieces))
-        pos = end
-    out.append(body[pos:])
-    return "".join(out)
+
+    def handler(kind: str):
+        def fn(args: list[str | None]) -> str:
+            pieces = []
+            for k in (k.strip() for k in (args[3] or "").split(",")):
+                if not k:
+                    continue
+                names, year = bib.get(k, ([], ""))
+                who = author_text(names) if names else k
+                if kind == "author":
+                    pieces.append(who)
+                elif kind == "year":
+                    pieces.append(year)
+                elif kind == "yearpar":
+                    pieces.append(f"({year})")
+                else:
+                    note = f"[{args[2]}]" if args[2] else ""
+                    pieces.append(f"{who}~\\cite{note}{{{k}}}")
+            return ", ".join(pieces)
+
+        return "soom", fn
+
+    table = {"citet": handler("text"), "Citet": handler("text"), "citealt": handler("text"),
+             "citeauthor": handler("author"), "Citeauthor": handler("author"),
+             "citeyear": handler("year"), "citeyearpar": handler("yearpar")}
+    return replace_commands(body, table)

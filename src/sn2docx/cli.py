@@ -4,23 +4,24 @@ from __future__ import annotations
 
 import argparse
 import logging
+import re
 import sys
 from pathlib import Path
 
 from . import __version__
+from .images import UNIT_IN
 from .pipeline import convert
 
 
 def _width(value: str) -> float | None:
-    if value.lower() in ("source", "latex", "auto"):
-        return None
+    """Figure width in inches from "3.25in", "8cm", "90mm", "3.25" or "source"."""
     v = value.lower().strip()
-    factor = 1.0
-    if v.endswith("cm"):
-        factor, v = 1 / 2.54, v[:-2]
-    elif v.endswith("in"):
-        v = v[:-2]
-    return float(v) * factor
+    if v in ("source", "latex", "auto"):
+        return None
+    m = re.fullmatch(r"([0-9.]+)\s*(in|cm|mm|pt|bp|pc)?", v)
+    if not m:
+        raise argparse.ArgumentTypeError(f"invalid width: {value}")
+    return float(m.group(1)) * UNIT_IN[m.group(2) or "in"]
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -8,11 +8,19 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from ..model import Conversion, Heading, Registry, marker
-from .extras import read_bib_authors, rewrite_packages, rewrite_textual_citations
+from .extras import map_math_aware, read_bib_authors, rewrite_packages, rewrite_textual_citations
 from .frontmatter import extract_frontmatter
-from .scan import command_re, find_commands, find_env, is_escaped, parse_command_args, read_optional, remove_command
-from .source import _segments, collect_macros, expand_macros, load_manuscript
-from .transform import Transformer, replace_refs_outside_math
+from .scan import (
+    find_commands,
+    find_env,
+    is_escaped,
+    map_nonverbatim,
+    parse_command_args,
+    read_optional,
+    replace_commands,
+)
+from .source import collect_macros, expand_macros, load_manuscript
+from .transform import Transformer, replace_refs
 
 log = logging.getLogger(__name__)
 
@@ -22,15 +30,20 @@ _NUMERIC_OPTIONS = {"sn-mathphys-num", "sn-vancouver-num", "sn-aps", "sn-nature"
 
 _THEOREM_STYLES = {"thmstyleone": "plain", "thmstyletwo": "plain", "thmstylethree": "definition"}
 
-# Commands dropped from the body before pandoc sees it.
-_DROP = [
-    ("maketitle", ""), ("backmatter", ""), ("frontmatter", ""), ("mainmatter", ""), ("raggedbottom", ""),
-    ("bigskip", ""), ("medskip", ""), ("smallskip", ""), ("noindent", ""), ("clearpage", ""),
-    ("cleardoublepage", ""), ("newpage", ""), ("pagebreak", "o"), ("nopagebreak", "o"), ("FloatBarrier", ""),
-    ("unskip", ""), ("centering", ""), ("lstset", "m"), ("vspace", "sm"), ("vskip", ""), ("linenumbers", ""),
-    ("nolinenumbers", ""), ("bibliographystyle", "m"), ("printbibliography", "o"), ("tableofcontents", ""),
-    ("hypersetup", "m"), ("graphicspath", "m"), ("setcounter", "mm"), ("addtocounter", "mm"),
-]
+# Body commands rewritten in one pass before pandoc sees the text: layout commands
+# are dropped; \footnotemark/\footnotetext pairs outside tables keep the text as a footnote.
+_BODY_COMMANDS = {
+    **{name: (spec, lambda a: "") for name, spec in (
+        ("maketitle", ""), ("backmatter", ""), ("frontmatter", ""), ("mainmatter", ""), ("raggedbottom", ""),
+        ("bigskip", ""), ("medskip", ""), ("smallskip", ""), ("noindent", ""), ("clearpage", ""),
+        ("cleardoublepage", ""), ("newpage", ""), ("pagebreak", "o"), ("nopagebreak", "o"), ("FloatBarrier", ""),
+        ("unskip", ""), ("centering", ""), ("lstset", "m"), ("vspace", "sm"), ("vskip", ""), ("linenumbers", ""),
+        ("nolinenumbers", ""), ("bibliographystyle", "m"), ("printbibliography", "o"), ("tableofcontents", ""),
+        ("hypersetup", "m"), ("graphicspath", "m"), ("setcounter", "mm"), ("addtocounter", "mm"),
+        ("footnotemark", "o"),
+    )},
+    "footnotetext": ("om", lambda a: "\\footnote{" + (a[1] or "") + "}"),
+}
 
 
 @dataclass
@@ -39,15 +52,11 @@ class PreprocessResult:
     conversion: Conversion
 
 
-def _map_nonverbatim(text: str, fn) -> str:
-    parts = []
-    for start, end, verbatim in _segments(text):
-        parts.append(text[start:end] if verbatim else fn(text[start:end]))
-    return "".join(parts)
-
-
 def parse_theorems(preamble: str) -> tuple[dict[str, tuple[str | None, str]], list[str]]:
-    """Return env -> (counter, title) and the pandoc preamble lines for theorems."""
+    """Return env -> (counter, title) and the pandoc preamble lines for theorems.
+
+    pandoc knows amsthm's ``proof`` environment natively, so it needs no entry.
+    """
     envs: dict[str, tuple[str | None, str]] = {}
     lines: list[str] = []
     pat = re.compile(r"\\(newtheorem\*?|theoremstyle|declaretheorem)(?![A-Za-z@])")
@@ -72,8 +81,6 @@ def parse_theorems(preamble: str) -> tuple[dict[str, tuple[str | None, str]], li
             counter = envs[shared][0] if shared and shared in envs else (shared or name)
             envs[name] = (counter, args[2] or "")
             lines.append(f"\\newtheorem{{{name}}}" + (f"[{shared}]" if shared else "") + f"{{{args[2]}}}")
-    if "proof" not in envs:
-        pass  # pandoc knows amsthm's proof environment natively
     return envs, lines
 
 
@@ -95,9 +102,8 @@ def citation_mode(options: list[str], style: str | None) -> str:
 
 def _bib_files(text: str, base: Path) -> tuple[list[Path], str]:
     files: list[Path] = []
-
-    def add(names: str):
-        for name in names.split(","):
+    for _, _, args in find_commands(text, "bibliography", "addbibresource", spec="om"):
+        for name in (args[1] or "").split(","):
             name = name.strip()
             if not name:
                 continue
@@ -108,12 +114,8 @@ def _bib_files(text: str, base: Path) -> tuple[list[Path], str]:
                 files.append(p)
             else:
                 log.warning("bibliography file not found: %s", p)
-
-    for cmd in ("bibliography", "addbibresource"):
-        for _, _, args in find_commands(text, cmd, "om"):
-            add(args[1] or "")
-        text = remove_command(text, cmd, "om")
-    return files, text
+    drop = ("om", lambda a: "")
+    return files, replace_commands(text, {"bibliography": drop, "addbibresource": drop})
 
 
 _BBL_WRAPPERS = re.compile(
@@ -131,7 +133,6 @@ def _clean_bibitem(text: str) -> str:
     text = re.sub(r"\\BibitemShut\s*\{[^}]*\}", "", text)
     text = re.sub(r"\\natexlab\s*\{([^}]*)\}", r"\1", text)
     text = re.sub(r"\\doi\s*\{([^}]*)\}", r"doi: \\url{https://doi.org/\1}", text)
-    text = re.sub(r"\\(bibinfo|bibfield)\s*\{[^{}]*\}", "", text)
     text = _BBL_WRAPPERS.sub("", text)
     return re.sub(r"\s+", " ", text).strip()
 
@@ -144,41 +145,36 @@ def _manual_bibliography(body: str, reg: Registry) -> tuple[str, list[tuple[str,
     _, i = parse_command_args(inner, 0, "m")
     inner = inner[i:]
     items: list[tuple[str, str]] = []
-    labels: dict[str, str] = {}
-    chunks = re.split(r"\\bibitem(?![A-Za-z@])", inner)
-    for chunk in chunks[1:]:
+    for chunk in re.split(r"\\bibitem(?![A-Za-z@])", inner)[1:]:
         opt, j = read_optional(chunk, 0)
         args, j = parse_command_args(chunk, j, "m")
         key = (args[0] or "").strip()
         items.append((key, _clean_bibitem(chunk[j:])))
-        labels[key] = opt or ""
+        reg.bib_labels[key] = opt or ""
         reg.bibitems.append(key)
-    body = body[: env.start] + body[env.end :]
-    reg.bib_labels = labels
-    return body, items
+    return body[: env.start] + body[env.end :], items
 
 
-_CITE_RE = re.compile(r"\\(cite|citep|citet|citealp|citealt|citeauthor|citeyear|citeyearpar|Cite|Citep|Citet|parencite|textcite|autocite|citenum)\*?(?![A-Za-z@])")
+_CITE_COMMANDS = ("cite", "citep", "citet", "citealp", "citealt", "citeauthor", "citeyear", "citeyearpar", "Cite",
+                  "Citep", "Citet", "parencite", "textcite", "autocite", "citenum")
 
 
 def _manual_citations(text: str, reg: Registry) -> str:
-    out = []
-    pos = 0
-    while True:
-        m = _CITE_RE.search(text, pos)
-        if not m:
-            break
-        if is_escaped(text, m.start()):
-            out.append(text[pos : m.end()])
-            pos = m.end()
-            continue
-        args, end = parse_command_args(text, m.end(), "oom")
-        keys = [k.strip() for k in (args[2] or "").split(",") if k.strip()]
-        reg.cites.append((m.group(1).lower(), keys))
-        out.append(text[pos : m.start()] + marker("CITE", len(reg.cites) - 1))
-        pos = end
-    out.append(text[pos:])
-    return "".join(out)
+    """Citations against a ``thebibliography`` list become CITE markers."""
+
+    def handler(name: str):
+        def fn(args: list[str | None]) -> str:
+            keys = [k.strip() for k in (args[3] or "").split(",") if k.strip()]
+            reg.cites.append((name.lower(), keys))
+            return marker("CITE", len(reg.cites) - 1)
+
+        return "soom", fn
+
+    return replace_commands(text, {name: handler(name) for name in _CITE_COMMANDS})
+
+
+def _replace_refs(text: str, reg: Registry) -> str:
+    return map_math_aware(text, lambda t: replace_refs(t, reg), lambda m: replace_refs(m, reg, math=True))
 
 
 def preprocess(path: Path) -> PreprocessResult:
@@ -192,12 +188,12 @@ def preprocess(path: Path) -> PreprocessResult:
     front, preamble, body = extract_frontmatter(preamble, body)
 
     graphics_paths = [ms.path.parent]
-    for _, _, args in find_commands(preamble + body, "graphicspath", "m"):
+    for _, _, args in find_commands(preamble + body, "graphicspath"):
         for g in re.findall(r"\{([^}]*)\}", args[0] or ""):
             graphics_paths.append((ms.path.parent / g).resolve())
 
     style = None
-    for _, _, args in find_commands(preamble + body, "bibliographystyle", "m"):
+    for _, _, args in find_commands(preamble + body, "bibliographystyle"):
         style = (args[0] or "").strip()
     bib_files, body = _bib_files(body, ms.path.parent)
     more, preamble = _bib_files(preamble, ms.path.parent)
@@ -214,28 +210,22 @@ def preprocess(path: Path) -> PreprocessResult:
     front.title = rewrite_packages(front.title)
     if mode == "numeric" and bib_files and not manual:
         authors = read_bib_authors(bib_files)
-        body = _map_nonverbatim(body, lambda s: rewrite_textual_citations(s, authors))
+        body = map_nonverbatim(body, lambda s: rewrite_textual_citations(s, authors))
         front.abstract = rewrite_textual_citations(front.abstract, authors)
 
     theorems, theorem_lines = parse_theorems(preamble)
-    t = Transformer(reg, theorems)
-    body = t.walk(body)
+    body = Transformer(reg, theorems).walk(body)
 
-    body = _map_nonverbatim(body, lambda s: replace_refs_outside_math(s, reg))
+    body = _replace_refs(body, reg)
     if manual:
-        body = _map_nonverbatim(body, lambda s: _manual_citations(s, reg))
+        body = map_nonverbatim(body, lambda s: _manual_citations(s, reg))
         front.abstract = _manual_citations(front.abstract, reg)
-    for name, spec in _DROP:
-        body = _map_nonverbatim(body, lambda s, n=name, sp=spec: remove_command(s, n, sp))
-    # \footnotemark/\footnotetext pairs outside tables: keep text as a footnote
-    body = _map_nonverbatim(body, lambda s: re.sub(r"\\footnotetext\s*(\[[^\]]*\])?\s*\{", r"\\footnote{", s))
-    body = _map_nonverbatim(body, lambda s: re.sub(r"\\footnotemark\s*(\[[^\]]*\])?", "", s))
+    body = map_nonverbatim(body, lambda s: replace_commands(s, _BODY_COMMANDS))
 
     if manual:
         reg.headings.append(Heading(1, False, False, ""))
-        j = len(reg.headings) - 1
-        parts = [f"\n\n\\section{{{marker('HEAD', j)}References}}\n\n"]
-        for n, (key, text) in enumerate(bib_items):
+        parts = [f"\n\n\\section{{{marker('HEAD', len(reg.headings) - 1)}References}}\n\n"]
+        for n, (_, text) in enumerate(bib_items):
             parts.append(f"{marker('BIB', n)} {text}\n\n")
         body += "".join(parts)
 
@@ -246,20 +236,16 @@ def preprocess(path: Path) -> PreprocessResult:
         fm_parts.append(f"{marker('FMAUTHOR', i)} {a.name}\n\n")
     for i, a in enumerate(front.affiliations):
         fm_parts.append(f"{marker('FMAFFIL', i)} {a.text}\n\n")
-    notes = []
-    for a in front.authors:
-        if a.equal and a.equal not in notes:
-            notes.append(a.equal)
+    notes = list(dict.fromkeys(a.equal for a in front.authors if a.equal))
     for i, n in enumerate(notes):
         fm_parts.append(f"{marker('FMNOTE', i)} {n}\n\n")
     if front.abstract:
-        abstract = replace_refs_outside_math(front.abstract, reg)
-        fm_parts.append(f"{marker('FMABSTRACT')}\n\n{abstract}\n\n")
+        fm_parts.append(f"{marker('FMABSTRACT')}\n\n{_replace_refs(front.abstract, reg)}\n\n")
     if front.keywords:
         fm_parts.append(f"{marker('FMKEYWORDS')} " + "; ".join(front.keywords) + "\n\n")
     fm_parts.append(f"{marker('FMEND')}\n\n")
 
-    math_ops = [preamble[s:e] for s, e, _ in find_commands(preamble, "DeclareMathOperator", "smm")]
+    math_ops = [preamble[s:e] for s, e, _ in find_commands(preamble, "DeclareMathOperator", spec="smm")]
     pandoc_preamble = "\n".join(["\\documentclass{article}", *math_ops, *theorem_lines])
     pandoc_tex = pandoc_preamble + "\n\\begin{document}\n" + "".join(fm_parts) + body + "\n\\end{document}\n"
 
@@ -272,9 +258,5 @@ def preprocess(path: Path) -> PreprocessResult:
         citation_mode=mode,
         manual_bibliography=manual,
         equal_notes=notes,
-        bib_items=bib_items,
     )
     return PreprocessResult(pandoc_tex, conv)
-
-
-__all__ = ["preprocess", "PreprocessResult", "citation_mode", "command_re"]
