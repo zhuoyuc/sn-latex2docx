@@ -1,0 +1,37 @@
+[project]
+name = "sn-latex2docx"
+version = "0.1.0"
+description = "Convert Springer Nature (sn-jnl) LaTeX manuscripts to Word documents that follow a house Word template."
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Zhuoyu Chen", email = "zhuoyuc@umich.edu" }]
+license = { text = "MIT" }
+dependencies = [
+    "lxml>=5.0",
+    "pymupdf>=1.24",
+    "pillow>=10.0",
+]
+
+[project.optional-dependencies]
+# Word automation, used only by scripts/ for rendering and field checks on Windows.
+word = ["pywin32>=306; sys_platform == 'win32'"]
+
+[project.scripts]
+sn2docx = "sn2docx.cli:main"
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0",
+    "python-docx>=1.1",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/sn2docx"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra"

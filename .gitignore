@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.eggs/
+build/
+dist/
+
+# Environments (uv)
+.venv/
+venv/
+
+# Tooling caches
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+htmlcov/
+
+# Conversion output and scratch
+output/
+*.tmp
+~$*.docx
+
+# LaTeX build artefacts
+*.aux
+*.bbl
+*.blg
+*.log
+*.out
+*.toc
+*.synctex.gz
+*.fdb_latexmk
+*.fls
+*-eps-converted-to.pdf
+
+# OS / editors
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

@@ -1,0 +1,75 @@
+% Edge cases that the two example manuscripts do not cover.
+\documentclass[sn-mathphys-ay]{sn-jnl}
+\usepackage{amsmath}
+\usepackage{amsthm}
+\usepackage{subfig}
+\newcommand{\vect}[1]{\mathbf{#1}}
+\newcommand{\sample}{Sample text}
+\newcommand{\figref}[1]{Fig.~\ref{#1}}
+\DeclareMathOperator{\diag}{diag}
+\newtheorem{lemma}{Lemma}
+\newtheorem{corollary}[lemma]{Corollary}
+
+\begin{document}
+\title{Edge cases for the \LaTeX\ to Word converter}
+\author*[1]{\fnm{Ada} \sur{Lovelace}}\email{ada@example.org}
+\author[1,2]{\fnm{Charles} \sur{Babbage}}\email{charles@example.org}
+\equalcont{Equal contribution.}
+\affil*[1]{\orgname{Analytical Engine Society}, \orgaddress{\city{London}, \country{UK}}}
+\affil[2]{\orgname{Difference Engine Lab}, \orgaddress{\city{Cambridge}, \country{UK}}}
+\abstract{An abstract that cites \citep{knuth84} and mentions \sample.}
+\keywords{edge cases; macros}
+\maketitle
+
+\section{Macros and theorems}\label{sec:macros}
+\sample{} with a vector $\vect{v}$ and an operator $\diag(x)$.% a trailing comment
+Joined line.
+
+\begin{lemma}\label{lem:first}
+A lemma with an equation
+\begin{equation}
+  a = b \tag{$\star$}\label{eq:star}
+\end{equation}
+\end{lemma}
+\begin{corollary}\label{cor:second}
+A corollary sharing the lemma counter.
+\end{corollary}
+See Lemma~\ref{lem:first}, Corollary~\ref{cor:second}, equation~\eqref{eq:star},
+\figref{fig:sub} and panel~\ref{fig:sub:b}. An undefined reference \ref{nope}.
+A footnote\footnote{Footnote pointing to Section~\ref{sec:macros}.} here.
+
+\begin{gather*}
+  x = 1 \\
+  y = 2
+\end{gather*}
+\begin{align}
+  p &= q \nonumber \\
+  r &= s \label{eq:rs}
+\end{align}
+
+\begin{figure}
+  \centering
+  \subfloat[Left panel\label{fig:sub:a}]{\includegraphics[width=0.4\textwidth]{missing-image}}
+  \subfloat[Right panel\label{fig:sub:b}]{\includegraphics[width=0.4\textwidth]{missing-image}}
+  \caption{Two sub-floats.}\label{fig:sub}
+\end{figure}
+
+\section{Algorithms}
+\begin{algorithm}
+\caption{Loop}\label{alg:loop}
+\begin{algorithmic}[1]
+\Procedure{Run}{$n$}
+  \For{$i = 1$ to $n$}\label{line:for}
+    \State \Call{Work}{$i$} \Comment{do work}
+  \EndFor
+  \State \Return $n$
+\EndProcedure
+\end{algorithmic}
+\end{algorithm}
+Line~\ref{line:for} of Algorithm~\ref{alg:loop}. Cite \citet{lamport94} and \citep{knuth84,lamport94}.
+
+\begin{thebibliography}{2}
+\bibitem[{Knuth(1984)}]{knuth84} D. E. Knuth. \newblock \emph{The {\TeX}book}. \newblock Addison-Wesley, 1984.
+\bibitem[{Lamport(1994)}]{lamport94} L. Lamport. \newblock \emph{{\LaTeX}: A Document Preparation System}. \newblock Addison-Wesley, 1994.
+\end{thebibliography}
+\end{document}
