@@ -1,29 +1,23 @@
 # sn-latex2docx
 
-Convert Springer Nature (`sn-jnl`) LaTeX manuscripts into editable Word documents
-that follow the house Word template (`src/sn2docx/resources/template.docx`). Equations,
-citations, cross-references, figures, tables and document structure are preserved.
-Numbers and references come out as live Word fields, not frozen text.
+sn-latex2docx converts a Springer Nature (`sn-jnl`) LaTeX manuscript into a Word document
+in the layout of `src/sn2docx/resources/template.docx`. Section, equation, figure, table and
+algorithm numbers are Word fields, and cross-references and citations link to their targets.
 
 ```
 uv sync
 uv run sn2docx paper/main.tex paper.docx
 ```
 
-The input is the main `.tex` file inside a complete manuscript folder, laid out like
-Springer Nature's template zip (`sn-jnl.cls`, the `.bst` files, figures, `.bib`). The
-output path is optional (default: next to the `.tex`). There are no other options: every
-setting comes from the manuscript, its folder, the TeX installation and the Word template.
-
 ## Requirements
 
-| Tool | Why | Notes |
-|---|---|---|
-| Python ≥ 3.10 + [uv](https://docs.astral.sh/uv/) | runs the converter | `uv sync` installs `lxml`, `pymupdf`, `pillow`, `pylatexenc`, `pint`, `python-docx` (and `pytest` for development) |
-| [pandoc](https://pandoc.org) ≥ 3.0 | LaTeX → OOXML for text, math, symbols and tables | on `PATH`, or `uv sync --extra pandoc` for the build shipped in `pypandoc_binary` |
-| A TeX distribution (TeX Live or MiKTeX) | `kpsewhich` finds the package sources the converter reads (cleveref, natbib, amsthm, algorithmicx, siunitx, caption …); `bibtex` formats the reference list | any standard installation; nothing is copied into this repository |
-| Ghostscript (`gswin64c`, `gs` or MiKTeX's `mgs`) | rasterises `.eps` figures | `epstopdf` is used as a fallback; PDF and SVG figures need nothing extra |
-| Microsoft Word (Windows, optional) | `scripts/word_check.py` only: field check and page renders | `uv sync --extra word` |
+| Tool | Purpose |
+|---|---|
+| Python 3.10 or later, [uv](https://docs.astral.sh/uv/) | runs the converter; `uv sync` installs lxml, PyMuPDF, Pillow, pylatexenc, pint and python-docx |
+| [pandoc](https://pandoc.org) 3.0 or later | converts text, mathematics and tables; taken from `PATH`, or from `pypandoc_binary` after `uv sync --extra pandoc` |
+| TeX Live or MiKTeX | `kpsewhich` locates class and package files, `bibtex` formats the reference list |
+| Ghostscript (`gswin64c`, `gs` or MiKTeX `mgs`) | converts EPS figures; `epstopdf` is the fallback |
+| Microsoft Word on Windows (optional) | field check and page rendering in `scripts/word_check.py`; `uv sync --extra word` |
 
 ## Usage
 
@@ -31,163 +25,143 @@ setting comes from the manuscript, its folder, the TeX installation and the Word
 sn2docx SOURCE.tex [OUTPUT.docx]
 ```
 
-Each run also validates the result (see *Verification*) and prints a one-line summary.
-From Python: `from sn2docx.pipeline import convert; convert(Path("main.tex"), Path("out.docx"))`.
+`SOURCE.tex` is the main file of a manuscript folder with the same contents as the
+Springer Nature template zip: `sn-jnl.cls`, the `.bst` files, the figures and the `.bib`
+files. `OUTPUT.docx` defaults to the source path with a `.docx` suffix. Every run ends with
+a structural check of the output and a one-line summary.
 
-## Where the words and symbols come from
+Python API:
 
-The code holds no symbol tables and no fixed words. `tests/test_convert.py` runs
-`scripts/find_hardcoded.py`, which fails on any non-ASCII literal or Unicode escape under
-`src/`. Instead:
+```python
+from pathlib import Path
+from sn2docx.pipeline import convert
 
-| Content | Source |
-|---|---|
-| Caption labels and separators ("Figure 1: "), equation brackets, "Abstract", "Keywords:", "Corresponding author:", author separator, "References", bullet glyphs | read from `template.docx` itself (`docx/template_text.py`) |
-| Class names (`\refname`, `\figurename`, `\keywordname`), "Contributing authors:", e-mail separator, `\equalcont` mark, reference style per class option, natbib options, theorem styles `thmstyleone…` | parsed from `sn-jnl.cls` (`latex/texdefs.py`) |
-| Cross-reference names and conjunctions ("Figure", "eqs.", " and ", " to "), which types get "(1)" | cleveref.sty for the chosen language and options, then the manuscript's `\crefname`/`\Crefname` |
-| Citation brackets, separators, author–year separator, range dash, `[1]` bibliography labels | natbib.sty after the class/manuscript options and `\setcitestyle` |
-| Reference list text | BibTeX runs the manuscript's (or the class's) `.bst` on the `.bib` files; the `.bbl` is read like `thebibliography` |
-| Algorithm keywords, block structure, comment marker, line-number format | algorithmicx.sty, algpseudocode.sty, algcompatible.sty |
-| "Algorithm", "Listing", sub-figure labels "(a) " | algorithm.sty `\ALG@name`, listings.sty `\lstlistingname`, subcaption.sty + caption3.sty |
-| Theorem head/body fonts and punctuation | the class's `\newtheoremstyle`, else amsthm's `\th@plain`/`\th@definition`/`\th@remark` |
-| siunitx list/range/product phrases, prefixes, powers | siunitx.sty |
-| Symbols (`\times`, `\dagger`, `--`, `\,` …) | pandoc (document text) and pylatexenc (plain-text contexts) |
-| Paragraph, run and table properties: title/author/abstract/keywords paragraphs, equation tab stops, image paragraphs, captions, compact table cells, table look and rules, bibliography hanging indent, link formatting, superscripts, list indents | cloned from the matching exemplar in `template.docx` |
-| Figure width, image resolution, page text block, body font size, document language, header date position | `template.docx` (picture extent, PNG dpi, section properties, styles, header) |
-| Header date | the class's `\today` (article.cls: month names and "Month day, year"), or `\date{…}` |
-| Algorithm caption and rules, indents, line-number size | float.sty's `ruled` style (via algorithm.sty), algorithmicx's `\algorithmicindent`/`\labelwidth`/`\labelsep`, `\alglinenumber`, the class's `\footnotesize` |
-| Booktabs rule weights (`\midrule`, `\cmidrule`) | booktabs.sty widths, relative to the template's table rule |
-| Table-note size | the class's `\footnotesize` relative to `\normalsize` |
-| Code font | pandoc's default reference.docx (`Verbatim Char`) |
-| Undefined references | LaTeX's `\@setref` ("??" in bold) |
-| Image file extensions tried | graphicx's driver (`\Gin@extensions` in pdftex.def); `\includesvg` uses svg.sty's extension |
-| Length and unit conversions | pint (TeX units), python-docx (EMU, twips, points) |
-
-## What is converted, and how it looks in Word
-
-| LaTeX (sn-jnl) | Word output (following the template) |
-|---|---|
-| `\title`, `\author*[1,2]{\fnm{}\sur{}}`, `\affil`, `\email`, `\equalcont` | *Title* and one *Author* paragraph: names with affiliation superscripts, corresponding and equal-contribution marks, affiliation lines, e-mail lines |
-| `\abstract`, `\keywords` | *Abstract Title* + *Abstract* paragraphs; the keywords line as written |
-| `\section` … `\subsubsection` | *Heading 1–3* with the template's automatic numbering (1, 1.1, 1.1.1) |
-| `\section*`, `\bmhead` | unnumbered *Heading 1* |
-| `appendices` / `\appendix` | lettered headings (A, A.1) from the template's appendix list |
-| `equation`, `align`, `gather`, `multline`, `eqnarray`, `\[…\]` | native Word equations; numbered rows get `(SEQ equation)` at a right tab stop; `\nonumber`/`\notag`/starred stay unnumbered; `\tag{}` is kept as static text |
-| `figure`, `subfigure`, `\subfloat`, `\subcaptionbox`, `sidewaysfigure` | centred images, always embedded as PNG or JPEG (PDF, SVG and EPS are rasterised at the resolution of the template's own images), sub-captions, *Image Caption* "Figure `SEQ figure`: …" |
-| `table`, `tabular(*)`, `tabularx`, `longtable`, booktabs, `\cmidrule`, `\multicolumn`, `\multirow`, `\footnotetext`, `threeparttable` | template table style (top/bottom rules, header rule, header rows repeat), `\cmidrule`/`\cline` as rules under exactly the spanned cells, table notes, *Table Caption* "Table `SEQ table`: …" |
-| `algorithm` + `algorithmic` (algpseudocode, algcompatible) | "Algorithm `SEQ algorithm`" caption between rules, indented lines, keywords as the packages print them, line numbers when `[n]` is given |
-| `\ref`, `\eqref`, `\cref`, `\Cref`, `\crefrange`, `\autoref` | `REF` fields to bookmarks (sections use `\w` for full numbers like 3.1.1); theorem/line/sub-figure targets become internal hyperlinks |
-| `\cite`, `\citep`, `\citet`, `\citealp`, `\citeauthor`, `\citeyear` + `.bib` | BibTeX with the manuscript's or class's style; numeric, superscript or author–year citations punctuated as natbib does, with pre/post notes; each citation links to its entry |
-| `thebibliography` / pasted `.bbl` | read directly, with the macros the `.bbl` and the class define |
-| `newtheorem` environments, `proof` | heads written from the manuscript's own counters: shared counters, `[section]` numbering ("Definition 3.1"), optional notes, the class's theorem styles |
-| `siunitx` (`\qty`, `\SI`, `\num`, `\unit`, lists, ranges, products), `mhchem` (`\ce`) | typeset text or math with correct superscripts/subscripts |
-| `\newcommand`, `\def`, `\newenvironment`, `\DeclareMathOperator`, `\input`/`\include` | expanded before conversion |
-| `verbatim`, `lstlisting`, `\verb` | monospace code blocks, untouched content |
-| footnotes, URLs, `enumerate[label=(\roman*)]`, `itemize`, `quote` | Word footnotes, clickable links, template list glyphs and indents |
-
-The page setup, header (`A PREPRINT - DATE`), footer page number, line numbering and all
-styles come from the template, so changing `template.docx`
-restyles every output.
-
-## How it works
-
-```
-main.tex ─► latex/ (preprocess) ─► pandoc ─► docx/ (post-process) ─► main.docx
-             │   ▲                            ▲   ▲
-             │   └ TeX sources (kpsewhich),   │   └ template.docx labels
-             │     bibtex                     │
-             └── Registry: numbers, labels ───┘
+convert(Path("main.tex"), Path("main.docx"))
 ```
 
-1. **LaTeX stage** (`src/sn2docx/latex/`): inline `\input`, strip comments, expand user
-   macros, extract the title block, run BibTeX, and walk the body once in document order.
-   The walk numbers headings, equations, floats, algorithms and theorems as LaTeX would,
-   binds every `\label` to its target, and leaves *markers* (`@@EQ3@@`, `@@REF7@@`, …) where
-   Word needs structure pandoc cannot produce.
-2. **pandoc** converts the result to docx with a reference document derived from the
-   template (styles, header/footer and section settings, no sample content).
-3. **docx stage** (`src/sn2docx/docx/`): replaces markers with the template's constructs:
-   author block, SEQ/REF fields and bookmarks, equation paragraphs, figure/table/algorithm
-   blocks, citations and bibliography bookmarks (`bibref_N`), heading numbering copied from
-   the template, header date and document properties.
+## Sources of text and formatting
 
-## Project layout
+| Output element | Source |
+|---|---|
+| Caption labels and separators, equation brackets, "Abstract", "Keywords:", "Corresponding author:", author separator, "References", bullet glyphs | `template.docx` |
+| Paragraph, run and table properties of titles, author block, abstract, keywords, equations, pictures, captions, table cells and rules, bibliography entries, links and lists | matching paragraphs in `template.docx` |
+| Figure width, image resolution, text block, body font size, document language | `template.docx` |
+| `\refname`, `\figurename`, `\keywordname`, "Contributing authors:", e-mail separator, `\equalcont` mark, reference style and natbib options per class option, theorem styles | `sn-jnl.cls` |
+| Header date | `\date{…}`, otherwise `\today` from `article.cls` |
+| Cross-reference names, list conjunctions, parenthesised equation numbers | `cleveref.sty` and the manuscript's `\crefname`/`\Crefname` |
+| Citation brackets and separators, range dash, numeric bibliography labels | `natbib.sty` with the class options and `\setcitestyle` |
+| Reference list | BibTeX with the manuscript's or the class's `.bst` |
+| Algorithm keywords, block structure, comment marker, line numbers | `algorithmicx.sty`, `algpseudocode.sty`, `algcompatible.sty` |
+| Algorithm caption rules and indents | `float.sty` ruled style, `algorithm.sty`, algorithmicx list lengths |
+| "Algorithm", "Listing", sub-figure labels | `algorithm.sty`, `listings.sty`, `subcaption.sty` and `caption3.sty` |
+| Theorem head and body fonts, punctuation | `\newtheoremstyle` in the class, otherwise `amsthm.sty` |
+| siunitx phrases, prefixes and powers | `siunitx.sty` |
+| Booktabs rule weights | `booktabs.sty`, scaled to the template's table rule |
+| Table-note and line-number sizes | `\footnotesize` and `\normalsize` in the class |
+| Mark for undefined references | `\@setref` in `latex.ltx` |
+| Image file extensions | `\Gin@extensions` in `pdftex.def`; `svg.sty` for `\includesvg` |
+| Code font | pandoc's default `reference.docx` |
+| Symbols | pandoc in document text, pylatexenc in plain-text fields |
+| Unit conversion | pint for TeX units, python-docx for Word units |
+
+`scripts/find_hardcoded.py` reports non-ASCII literals and Unicode escapes under `src/`, and
+the test suite runs it.
+
+## Supported LaTeX
+
+| LaTeX | Word |
+|---|---|
+| `\title`, `\author`, `\affil`, `\email`, `\equalcont` | Title paragraph and one Author paragraph with affiliation, corresponding and equal-contribution marks |
+| `\abstract`, `\keywords` | Abstract heading, abstract paragraphs, keywords line |
+| `\section` to `\subsubsection` | Heading 1 to 3 with the template's numbering |
+| `\section*`, `\bmhead` | unnumbered Heading 1 |
+| `appendices`, `\appendix` | lettered headings from the template's appendix list |
+| `equation`, `align`, `gather`, `multline`, `eqnarray`, `\[…\]` | Word equations; numbered rows carry a `SEQ equation` field, `\tag` values stay as text |
+| `figure`, `subfigure`, `\subfloat`, `\subcaptionbox`, `sidewaysfigure`, `\includesvg` | PNG or JPEG pictures, sub-captions, caption with a `SEQ figure` field |
+| `table`, `tabular`, `tabular*`, `tabularx`, `longtable`, booktabs, `\multicolumn`, `\multirow`, `threeparttable` | tables in the template style, repeated header rows, `\cmidrule` and `\cline` under the spanned cells, table notes, caption with a `SEQ table` field |
+| `algorithm`, `algorithmic` | caption with a `SEQ algorithm` field, indented and optionally numbered lines |
+| `\ref`, `\eqref`, `\cref`, `\Cref`, `\crefrange`, `\autoref` | `REF` fields and internal hyperlinks |
+| `\cite`, `\citep`, `\citet`, `\citealp`, `\citeauthor`, `\citeyear` | natbib citations linked to the reference list |
+| `thebibliography`, pasted `.bbl` | reference list |
+| `\newtheorem`, `proof` | theorem heads with the manuscript's counters and the class's styles |
+| siunitx, mhchem | text and mathematics |
+| `\newcommand`, `\def`, `\newenvironment`, `\DeclareMathOperator`, `\input`, `\include` | expanded before conversion |
+| `verbatim`, `lstlisting`, `\verb` | code blocks |
+| footnotes, URLs, `enumerate`, `itemize`, `quote` | footnotes, hyperlinks, lists in the template's list style |
+
+Page setup, header, footer, line numbering and styles are those of `template.docx`.
+
+## Pipeline
+
+```
+main.tex ─► latex/ ─► pandoc ─► docx/ ─► main.docx
+```
+
+1. `src/sn2docx/latex/` reads the manuscript, expands macros, extracts the title block,
+   runs BibTeX and walks the body in document order. The walk numbers headings, equations,
+   floats, algorithms and theorems, binds each `\label` to its target and inserts markers
+   such as `@@EQ3@@` and `@@REF7@@`.
+2. pandoc converts the result to docx with a reference document built from the template.
+3. `src/sn2docx/docx/` replaces the markers with template paragraphs, `SEQ` and `REF`
+   fields, bookmarks, pictures, tables, algorithm blocks, citations and the reference list,
+   and sets the header date and document properties.
+
+## Repository layout
 
 ```
 src/sn2docx/
   cli.py, pipeline.py, pandoc.py, images.py, model.py
-  latex/      scan.py (TeX scanning) · source.py (inputs, macros) · frontmatter.py
-              texdefs.py (reads class and package sources) · bibliography.py (BibTeX, .bbl)
-              transform.py (numbering walker, floats, algorithms, refs) · extras.py (siunitx, mhchem)
-              preprocess.py (orchestration)
-  docx/       package.py (zip parts) · ooxml.py (element builders) · template_text.py
-              postprocess.py · verify.py
-  resources/  template.docx (house Word template)
-templates/springer-nature/   the official sn-jnl LaTeX template (class, bst files, manual);
-                             its sn-article.tex is also a test manuscript
-examples/
-  reference-manuscript/      the Word template's own content written as an sn-jnl manuscript
+  latex/      scan.py, source.py, frontmatter.py, texdefs.py, bibliography.py,
+              transform.py, extras.py, preprocess.py
+  docx/       package.py, ooxml.py, template_text.py, postprocess.py, verify.py
+  resources/  template.docx
+templates/springer-nature/   official sn-jnl template; sn-article.tex is a test manuscript
+examples/reference-manuscript/   the content of template.docx as an sn-jnl manuscript
 tests/                       unit tests, end-to-end tests, edge-case fixture
-scripts/word_check.py        Word-based field verification and page rendering
-scripts/find_hardcoded.py    fails on hard-coded symbols in src/
+scripts/word_check.py        field check and page rendering in Word
+scripts/find_hardcoded.py    scan for hard-coded characters in src/
 ```
 
-## Verification
+## Tests
 
-* `uv run pytest` – 59 tests: scanner, front matter, class/package parsing, numbering,
-  tables, algorithms, siunitx/mhchem, BibTeX, one regression test per fixed bug, end-to-end
-  conversions of all three manuscripts, "only PNG/JPEG media", and the hard-coded-content
-  scan. The reference manuscript is compared with `template.docx`: same heading tree,
-  caption numbers, SEQ fields, image and table counts, reference-list text.
-* every `sn2docx` run / `sn2docx.docx.verify.inspect()` – no leftover markers; unique
-  bookmark names and ids; every `REF` field and internal hyperlink resolves; relationships
-  and numbering ids exist.
-* `uv run --extra word python scripts/word_check.py out.docx [--png pages/] [--pdf out.pdf]` –
-  opens the file in Word, updates every field, and reports any cached value that Word
-  computes differently; optionally renders the pages for visual review. The example outputs
-  report 0 mismatches and 0 errors.
+* `uv run pytest` runs 59 tests: LaTeX scanning, front matter, class and package parsing,
+  numbering, tables, algorithms, siunitx, mhchem, BibTeX, regressions, and end-to-end
+  conversions of the three manuscripts. The reference manuscript is compared with
+  `template.docx` for headings, caption numbers, fields, pictures, tables and reference
+  text.
+* `sn2docx.docx.verify.inspect()`, called after every conversion, checks markers, bookmark
+  names and ids, `REF` targets, hyperlinks, relationships and numbering ids.
+* `uv run --extra word python scripts/word_check.py out.docx [--png pages/] [--pdf out.pdf]`
+  updates all fields in Word and lists cached values that differ from Word's results.
 
-## Known limitations
+## Limitations
 
-* The document class and `.bst` files must be next to the manuscript (as in the template
-  zip) or installed in the TeX distribution.
-* Display equations follow the template: an inline Word equation followed by a tab and the
-  number, so large operators and fractions use Word's inline sizing.
-* PDF, EPS and SVG figures are rasterised (Word cannot embed them as vectors).
-* Multi-panel figures stack panels vertically (one image per line with its sub-caption).
-* Cell colours are dropped.
-* Journal-specific commands outside sn-jnl and the common packages above are passed to
-  pandoc as-is; check the warnings the CLI prints.
+* The class and `.bst` files are looked up next to the manuscript and in the TeX
+  installation.
+* Display equations are inline Word equations followed by a tab and the number, as in the
+  template, so large operators use inline sizing.
+* PDF, EPS and SVG figures are rasterised.
+* Panels of multi-panel figures are stacked vertically.
+* Table cell colours are dropped.
+* Commands from packages outside the list above go to pandoc unchanged; the CLI prints a
+  warning for each problem it detects.
 
-## Libraries versus in-house code
+## Dependencies
 
-| Job | Done by | Notes |
-|---|---|---|
-| LaTeX → Word text, OMML math, tables, footnotes, lists, symbols | pandoc | the core of the conversion |
-| Reference list formatting | BibTeX with the journal's `.bst` | the same output LaTeX would typeset |
-| Package and class definitions | the TeX installation (`kpsewhich`) | read, never copied |
-| LaTeX → plain text (document properties, tags, labels) | [pylatexenc](https://github.com/phfaist/pylatexenc) | accents, symbols, `~` |
-| TeX length units | [pint](https://pint.readthedocs.io) | `pt`, `bp`, `pc`, `dd`, `cc`, `sp` … |
-| PDF and SVG figures → PNG | PyMuPDF | |
-| EPS figures → PNG | Ghostscript (`gs`/`gswin64c`/MiKTeX `mgs`), `epstopdf` fallback | Pillow's EPS plugin also calls Ghostscript but cannot find MiKTeX's `mgs` |
-| Raster formats, TIFF → PNG | Pillow | |
-| XML editing of the .docx parts | lxml | |
-| Bundled pandoc (optional) | pypandoc_binary | `uv sync --extra pandoc` |
-| Rendering and field checks | Microsoft Word via pywin32 | `scripts/word_check.py` |
+| Task | Library or tool |
+|---|---|
+| Text, mathematics, tables, footnotes, lists | pandoc |
+| Reference list | BibTeX |
+| Class and package files | TeX distribution (`kpsewhich`) |
+| Plain text from LaTeX | [pylatexenc](https://github.com/phfaist/pylatexenc) |
+| TeX units | [pint](https://pint.readthedocs.io) |
+| Word units | python-docx |
+| PDF and SVG figures | PyMuPDF |
+| EPS figures | Ghostscript, `epstopdf` |
+| Raster images | Pillow |
+| docx XML | lxml |
+| Word field check | Microsoft Word via pywin32 |
 
-Kept in-house, after checking the alternatives:
-
-* **LaTeX scanning** (`latex/scan.py`). The preprocessor rewrites the source in place and
-  must hand everything it does not touch to pandoc byte for byte. pylatexenc's
-  `LatexWalker` and TexSoup parse into node trees that need an argument spec for every
-  macro and do not round-trip unknown input losslessly.
-* **Macro expansion** (`latex/source.py`). pandoc expands `\newcommand` itself, but only
-  after our walker has run, and the walker must see `\ref`/`\label` hidden inside macros.
-* **Reading package definitions** (`latex/texdefs.py`). No Python library evaluates `.sty`
-  files; the parsers read the specific definitions they need (`\crefname@preamble`,
-  `\algdef`, `\newtheoremstyle`, `\DeclareOption` bodies …) and evaluate simple `\if…\fi`
-  switches.
-* **mhchem** (`latex/extras.py`). There is no Python implementation (it lives in
-  MathJax/KaTeX); the formula syntax is rewritten into LaTeX math for pandoc.
-* **Package handling** (`docx/package.py`). python-docx does not cover fields, bookmarks,
-  OMML or numbering definitions; the tests use it to confirm that the output opens.
+The LaTeX scanner (`latex/scan.py`), macro expansion (`latex/source.py`), package parsing
+(`latex/texdefs.py`), mhchem conversion (`latex/extras.py`) and docx package handling
+(`docx/package.py`) are part of this repository.
