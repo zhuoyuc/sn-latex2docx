@@ -508,6 +508,7 @@ dependencies = [
     { name = "pint", version = "0.26.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pylatexenc" },
     { name = "pymupdf" },
+    { name = "python-docx" },
 ]
 
 [package.optional-dependencies]
@@ -532,6 +533,7 @@ requires-dist = [
     { name = "pylatexenc", specifier = ">=2.10" },
     { name = "pymupdf", specifier = ">=1.24" },
     { name = "pypandoc-binary", marker = "extra == 'pandoc'", specifier = ">=1.13" },
+    { name = "python-docx", specifier = ">=1.2.0" },
     { name = "pywin32", marker = "sys_platform == 'win32' and extra == 'word'", specifier = ">=306" },
 ]
 provides-extras = ["word", "pandoc"]

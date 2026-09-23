@@ -161,10 +161,10 @@ def _replace_refs(text: str, reg: Registry) -> str:
     return map_math_aware(text, lambda t: replace_refs(t, reg), lambda m: replace_refs(m, reg, math=True))
 
 
-def preprocess(path: Path, tex_dirs: tuple[Path, ...] = ()) -> PreprocessResult:
-    """``tex_dirs``: extra folders for the class and ``.bst`` files, searched after the manuscript's."""
+def preprocess(path: Path) -> PreprocessResult:
+    """The class and ``.bst`` files are looked up next to the manuscript, then in the TeX installation."""
     ms = load_manuscript(path)
-    search = (ms.path.parent, *(Path(d) for d in tex_dirs))
+    search = (ms.path.parent,)
     preamble, macros = collect_macros(ms.preamble)
     # definitions made inside the body (rare) are honoured too
     body, macros = collect_macros(ms.body, macros)
@@ -173,8 +173,8 @@ def preprocess(path: Path, tex_dirs: tuple[Path, ...] = ()) -> PreprocessResult:
 
     doc_class = texdefs.document_class(ms.documentclass, search) if ms.documentclass else None
     if ms.documentclass and doc_class is None:
-        log.warning("%s.cls not found: put it next to the manuscript or pass its folder with --tex-dir; "
-                    "class names, reference style and theorem styles are unavailable", ms.documentclass)
+        log.warning("%s.cls is neither next to the manuscript nor installed: class names, reference "
+                    "style and theorem styles are unavailable", ms.documentclass)
     class_macros = collect_macros(doc_class.source)[1] if doc_class else MacroTable()
     front, preamble, body = extract_frontmatter(preamble, body, doc_class)
 
@@ -210,6 +210,15 @@ def preprocess(path: Path, tex_dirs: tuple[Path, ...] = ()) -> PreprocessResult:
     if bib is not None:
         reg.bibitems = [k for k, _ in bib.items]
         reg.bib_labels = bib.labels
+
+    # \includesvg{name} (svg package) is \includegraphics of name.<svg extension>
+    def includesvg(a: list[str | None]) -> str:
+        name = (a[1] or "").strip()
+        ext = texdefs.svg_extension()
+        name = name if Path(name).suffix or not ext else f"{name}.{ext}"
+        return "\\includegraphics" + (f"[{a[0]}]" if a[0] is not None else "") + "{" + name + "}"
+
+    body = replace_commands(body, {"includesvg": ("om", includesvg)})
 
     # packages pandoc handles poorly: siunitx, mhchem
     body = rewrite_packages(body)
@@ -272,5 +281,6 @@ def preprocess(path: Path, tex_dirs: tuple[Path, ...] = ()) -> PreprocessResult:
         cref_parens=cref.parens,
         equal_mark=doc_class.equalcont_mark() if doc_class else None,
         names=names,
+        doc_class=doc_class,
     )
     return PreprocessResult(pandoc_tex, conv)

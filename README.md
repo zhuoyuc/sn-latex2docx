@@ -7,14 +7,19 @@ Numbers and references come out as live Word fields, not frozen text.
 
 ```
 uv sync
-uv run sn2docx paper/main.tex -o paper.docx --check
+uv run sn2docx paper/main.tex paper.docx
 ```
+
+The input is the main `.tex` file inside a complete manuscript folder, laid out like
+Springer Nature's template zip (`sn-jnl.cls`, the `.bst` files, figures, `.bib`). The
+output path is optional (default: next to the `.tex`). There are no other options: every
+setting comes from the manuscript, its folder, the TeX installation and the Word template.
 
 ## Requirements
 
 | Tool | Why | Notes |
 |---|---|---|
-| Python ≥ 3.10 + [uv](https://docs.astral.sh/uv/) | runs the converter | `uv sync` installs `lxml`, `pymupdf`, `pillow`, `pylatexenc`, `pint` (and `pytest`, `python-docx` for development) |
+| Python ≥ 3.10 + [uv](https://docs.astral.sh/uv/) | runs the converter | `uv sync` installs `lxml`, `pymupdf`, `pillow`, `pylatexenc`, `pint`, `python-docx` (and `pytest` for development) |
 | [pandoc](https://pandoc.org) ≥ 3.0 | LaTeX → OOXML for text, math, symbols and tables | on `PATH`, or `uv sync --extra pandoc` for the build shipped in `pypandoc_binary` |
 | A TeX distribution (TeX Live or MiKTeX) | `kpsewhich` finds the package sources the converter reads (cleveref, natbib, amsthm, algorithmicx, siunitx, caption …); `bibtex` formats the reference list | any standard installation; nothing is copied into this repository |
 | Ghostscript (`gswin64c`, `gs` or MiKTeX's `mgs`) | rasterises `.eps` figures | `epstopdf` is used as a fallback; PDF and SVG figures need nothing extra |
@@ -23,20 +28,11 @@ uv run sn2docx paper/main.tex -o paper.docx --check
 ## Usage
 
 ```
-sn2docx SOURCE.tex [-o OUT.docx] [--template T.docx] [--figure-width 3.25in|8cm|source]
-                   [--date "May 1, 2026"] [--tex-dir DIR] [--keep-intermediate DIR] [--check] [-q]
+sn2docx SOURCE.tex [OUTPUT.docx]
 ```
 
-* `--figure-width` – every figure is scaled to one width (3.25 in, as in the template).
-  Use `source` to keep the `\includegraphics[width=…]` widths instead.
-* `--date` – text in the page header (`A PREPRINT - <DATE>`). Defaults to `\date{…}`, else today.
-* `--tex-dir DIR` – where to find `sn-jnl.cls` and its `.bst` files when they are neither next
-  to the manuscript nor installed in the TeX distribution, e.g.
-  `--tex-dir templates/springer-nature` for the examples in this repository. Repeatable.
-* `--check` – run the structural validator on the output (see *Verification*).
-* `--keep-intermediate DIR` – keep the preprocessed LaTeX and pandoc's raw docx for debugging.
-
-From Python: `from sn2docx.pipeline import convert; convert(Path("main.tex"), Path("out.docx"), tex_dirs=(...,))`.
+Each run also validates the result (see *Verification*) and prints a one-line summary.
+From Python: `from sn2docx.pipeline import convert; convert(Path("main.tex"), Path("out.docx"))`.
 
 ## Where the words and symbols come from
 
@@ -56,7 +52,16 @@ The code holds no symbol tables and no fixed words. `tests/test_convert.py` runs
 | Theorem head/body fonts and punctuation | the class's `\newtheoremstyle`, else amsthm's `\th@plain`/`\th@definition`/`\th@remark` |
 | siunitx list/range/product phrases, prefixes, powers | siunitx.sty |
 | Symbols (`\times`, `\dagger`, `--`, `\,` …) | pandoc (document text) and pylatexenc (plain-text contexts) |
-| Length units in `\includegraphics[width=…]` | pint |
+| Paragraph, run and table properties: title/author/abstract/keywords paragraphs, equation tab stops, image paragraphs, captions, compact table cells, table look and rules, bibliography hanging indent, link formatting, superscripts, list indents | cloned from the matching exemplar in `template.docx` |
+| Figure width, image resolution, page text block, body font size, document language, header date position | `template.docx` (picture extent, PNG dpi, section properties, styles, header) |
+| Header date | the class's `\today` (article.cls: month names and "Month day, year"), or `\date{…}` |
+| Algorithm caption and rules, indents, line-number size | float.sty's `ruled` style (via algorithm.sty), algorithmicx's `\algorithmicindent`/`\labelwidth`/`\labelsep`, `\alglinenumber`, the class's `\footnotesize` |
+| Booktabs rule weights (`\midrule`, `\cmidrule`) | booktabs.sty widths, relative to the template's table rule |
+| Table-note size | the class's `\footnotesize` relative to `\normalsize` |
+| Code font | pandoc's default reference.docx (`Verbatim Char`) |
+| Undefined references | LaTeX's `\@setref` ("??" in bold) |
+| Image file extensions tried | graphicx's driver (`\Gin@extensions` in pdftex.def); `\includesvg` uses svg.sty's extension |
+| Length and unit conversions | pint (TeX units), python-docx (EMU, twips, points) |
 
 ## What is converted, and how it looks in Word
 
@@ -68,7 +73,7 @@ The code holds no symbol tables and no fixed words. `tests/test_convert.py` runs
 | `\section*`, `\bmhead` | unnumbered *Heading 1* |
 | `appendices` / `\appendix` | lettered headings (A, A.1) from the template's appendix list |
 | `equation`, `align`, `gather`, `multline`, `eqnarray`, `\[…\]` | native Word equations; numbered rows get `(SEQ equation)` at a right tab stop; `\nonumber`/`\notag`/starred stay unnumbered; `\tag{}` is kept as static text |
-| `figure`, `subfigure`, `\subfloat`, `\subcaptionbox`, `sidewaysfigure` | centred images, always embedded as PNG or JPEG (PDF, SVG and EPS are rasterised at 300 dpi), sub-captions, *Image Caption* "Figure `SEQ figure`: …" |
+| `figure`, `subfigure`, `\subfloat`, `\subcaptionbox`, `sidewaysfigure` | centred images, always embedded as PNG or JPEG (PDF, SVG and EPS are rasterised at the resolution of the template's own images), sub-captions, *Image Caption* "Figure `SEQ figure`: …" |
 | `table`, `tabular(*)`, `tabularx`, `longtable`, booktabs, `\cmidrule`, `\multicolumn`, `\multirow`, `\footnotetext`, `threeparttable` | template table style (top/bottom rules, header rule, header rows repeat), `\cmidrule`/`\cline` as rules under exactly the spanned cells, table notes, *Table Caption* "Table `SEQ table`: …" |
 | `algorithm` + `algorithmic` (algpseudocode, algcompatible) | "Algorithm `SEQ algorithm`" caption between rules, indented lines, keywords as the packages print them, line numbers when `[n]` is given |
 | `\ref`, `\eqref`, `\cref`, `\Cref`, `\crefrange`, `\autoref` | `REF` fields to bookmarks (sections use `\w` for full numbers like 3.1.1); theorem/line/sub-figure targets become internal hyperlinks |
@@ -81,7 +86,7 @@ The code holds no symbol tables and no fixed words. `tests/test_convert.py` runs
 | footnotes, URLs, `enumerate[label=(\roman*)]`, `itemize`, `quote` | Word footnotes, clickable links, template list glyphs and indents |
 
 The page setup, header (`A PREPRINT - DATE`), footer page number, line numbering and all
-styles come from the template, so changing `template.docx` (or passing `--template`)
+styles come from the template, so changing `template.docx`
 restyles every output.
 
 ## How it works
@@ -134,7 +139,7 @@ scripts/find_hardcoded.py    fails on hard-coded symbols in src/
   conversions of all three manuscripts, "only PNG/JPEG media", and the hard-coded-content
   scan. The reference manuscript is compared with `template.docx`: same heading tree,
   caption numbers, SEQ fields, image and table counts, reference-list text.
-* `sn2docx … --check` / `sn2docx.docx.verify.inspect()` – no leftover markers; unique
+* every `sn2docx` run / `sn2docx.docx.verify.inspect()` – no leftover markers; unique
   bookmark names and ids; every `REF` field and internal hyperlink resolves; relationships
   and numbering ids exist.
 * `uv run --extra word python scripts/word_check.py out.docx [--png pages/] [--pdf out.pdf]` –
@@ -144,12 +149,11 @@ scripts/find_hardcoded.py    fails on hard-coded symbols in src/
 
 ## Known limitations
 
-* The document class and `.bst` files must be findable: next to the manuscript, in the TeX
-  installation, or through `--tex-dir`. Without the class, its names, reference style and
-  theorem styles are unavailable (the CLI warns).
+* The document class and `.bst` files must be next to the manuscript (as in the template
+  zip) or installed in the TeX distribution.
 * Display equations follow the template: an inline Word equation followed by a tab and the
   number, so large operators and fractions use Word's inline sizing.
-* PDF, EPS and SVG figures are rasterised at 300 dpi (Word cannot embed them as vectors).
+* PDF, EPS and SVG figures are rasterised (Word cannot embed them as vectors).
 * Multi-panel figures stack panels vertically (one image per line with its sub-caption).
 * Cell colours are dropped.
 * Journal-specific commands outside sn-jnl and the common packages above are passed to

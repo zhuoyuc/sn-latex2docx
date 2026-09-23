@@ -460,9 +460,178 @@ def caption_separator(class_source: str = "") -> str:
     return " "
 
 
+# ------------------------------------------------------------------ lengths
+# TeX's unit keywords and the names pint gives the same units (the sizes come from pint)
+TEX_UNITS = {"in": "inch", "cm": "centimeter", "mm": "millimeter", "pt": "tex_point", "bp": "big_point",
+             "pc": "tex_pica", "dd": "didot", "cc": "cicero", "sp": "scaled_point"}
+
+
+@cache
+def _units():
+    import pint
+
+    return pint.UnitRegistry()
+
+
+def points_to(value: float, unit: str) -> float:
+    """Convert TeX points to a pint unit ("inch", "big_point" ...)."""
+    return _units().Quantity(value, "tex_point").to(unit).magnitude
+
+_UNIT_RE = re.compile(r"([-+]?[0-9]*\.?[0-9]+)\s*(pt|bp|mm|cm|in|pc|dd|cc|sp|em|ex|\\p@)")
+
+
+def tex_length(text: str, em: float = 0.0) -> float | None:
+    """A TeX dimension in points (``.8pt``, ``.4\\p@``, ``1.5em`` with ``em`` points, ``\\z@``)."""
+    text = text.strip()
+    if re.fullmatch(r"\\z@", text):
+        return 0.0
+    m = _UNIT_RE.match(text)
+    if not m:
+        return None
+    value, unit = float(m.group(1)), m.group(2)
+    if unit == "\\p@":
+        unit = "pt"
+    if unit == "em":
+        return value * em
+    if unit == "ex":
+        return None
+    return _units().Quantity(value, TEX_UNITS[unit]).to("tex_point").magnitude
+
+
+def _assigned(src: str, name: str) -> str | None:
+    """The last value assigned to a length: ``\\setlength\\x{v}``, ``\\x=v``, ``\\x v``."""
+    found = None
+    for m in re.finditer(r"\\setlength\s*\{?\\" + re.escape(name) + r"\}?\s*\{([^}]*)\}|"
+                         r"\\" + re.escape(name) + r"(?![A-Za-z@])\s*=?\s*([-+]?[0-9]*\.?[0-9]+\s*(?:\\p@|[a-z]{2}))", src):
+        found = m.group(1) or m.group(2)
+    return found
+
+
+@dataclass
+class FloatStyle:
+    """float.sty's ``ruled`` style (algorithm.sty's default): caption font and rules."""
+
+    caption_bold: bool = False
+    caption_sep: str = " "  # between "Algorithm 1" and the caption
+    top_rule: float | None = None  # pt; above the caption
+    rule: float | None = None  # pt; below the caption and at the end (\hrule's default)
+
+
+@cache
+def float_style(class_source: str = "") -> FloatStyle:
+    src = tex_source("float.sty")
+    name = re.search(r"\\newcommand\{\\ALG@floatstyle\}\{(\w+)\}", tex_source("algorithm.sty"))
+    style = name.group(1) if name else "ruled"
+    fs = FloatStyle()
+    m = re.search(r"\\newcommand\\fs@" + style + r"\{", src)
+    if not m:
+        return fs
+    body = read_group(src, m.end() - 1)[0]
+    fs.caption_bold = bool(re.search(r"\\def\\@fs@cfont\{[^}]*\\bfseries", body))
+    capt = re.search(r"\\newcommand\\floatc@" + style + r"\[2\]\{\{\\@fs@cfont #1\}(.*?)#2", src)
+    if capt:
+        fs.caption_sep = capt.group(1)
+    pre = re.search(r"\\def\\@fs@pre\{\\hrule height\s*([^ ]+)", body)
+    fs.top_rule = tex_length(pre.group(1)) if pre else None
+    # a bare \hrule is as thick as LaTeX's standard rules
+    rule = _assigned(class_source, "arrayrulewidth") or _assigned(tex_source("article.cls"), "arrayrulewidth")
+    fs.rule = tex_length(rule) if rule else None
+    return fs
+
+
+@dataclass
+class AlgLayout:
+    """algorithmicx's list geometry (TeX lengths, may use em)."""
+
+    indent: str = ""  # \algorithmicindent per block level
+    labelwidth_numbered: str = ""
+    labelwidth_plain: str = ""
+    labelsep: str = ""
+
+
+@cache
+def alg_layout() -> AlgLayout:
+    src = tex_source("algorithmicx.sty")
+    lay = AlgLayout()
+    m = re.search(r"\\algnewcommand\\algorithmicindent\{([^}]*)\}", src)
+    lay.indent = m.group(1) if m else ""
+    m = re.search(r"\\ifthenelse\{\\equal\{#1\}\{0\}\}%?\s*\{\\labelwidth\s*([^}]*)\}%?\s*\{\\labelwidth\s*([^}]*)\}", src)
+    if m:
+        lay.labelwidth_plain, lay.labelwidth_numbered = m.group(1).strip(), m.group(2).strip()
+    m = re.search(r"\\labelsep\s*([0-9.]+\s*[a-z]{2})", src)
+    lay.labelsep = m.group(1) if m else ""
+    return lay
+
+
+@cache
+def booktabs_rules() -> dict[str, str]:
+    """booktabs' rule widths: heavyrulewidth, lightrulewidth, cmidrulewidth (TeX lengths)."""
+    src = tex_source("booktabs.sty")
+    return {name: m.group(1) for name in ("heavyrulewidth", "lightrulewidth", "cmidrulewidth")
+            if (m := re.search(r"\\" + name + r"\s*=\s*([0-9.]+\s*[a-z]{2})", src))}
+
+
+@cache
+def svg_extension() -> str:
+    """The file extension ``\\includesvg`` adds (svg.sty's ``\\svg@file@ext``)."""
+    m = re.search(r"\\newcommand\*?\\svg@file@ext\{([^}]*)\}", tex_source("svg.sty"))
+    return m.group(1) if m else ""
+
+
+@cache
+def undefined_ref() -> tuple[str, bool]:
+    """What LaTeX prints for an undefined reference (``\\@setref``), and whether it is bold."""
+    src = tex_source("latex.ltx")
+    m = re.search(r"\\def\\@setref#1#2#3\{.*?\\nfss@text\{(.*?)\}", src, re.S)
+    if not m:
+        return "", False
+    text = m.group(1)
+    bold = "\\bfseries" in text
+    return re.sub(r"\\[A-Za-z@]+", "", text).strip(), bold
+
+
 @dataclass
 class DocumentClass:
     source: str
+    base: "DocumentClass | None" = None  # the class loaded with \LoadClass
+
+    def definition(self, macro: str) -> str | None:
+        """Body of ``\\def\\macro`` or ``\\newcommand\\macro`` here or in the base class."""
+        m = None
+        for m in re.finditer(r"\\(?:renewcommand|newcommand|def|gdef)\s*\{?\\" + re.escape(macro) + r"\}?\s*\{", self.source):
+            pass
+        if m is not None:
+            return read_group(self.source, m.end() - 1)[0]
+        return self.base.definition(macro) if self.base else None
+
+    def today(self) -> tuple[list[str], str]:
+        """Month names and the layout of ``\\today`` ("{month} {day}, {year}")."""
+        body = self.definition("today") or ""
+        ifcase = re.search(r"\\ifcase\\month\\or(.*?)\\fi", body, re.S)
+        if not ifcase:
+            return [], ""
+        months = [x.strip() for x in ifcase.group(1).split("\\or")]
+        layout = body[: ifcase.start()] + "{month}" + body[ifcase.end():]
+        layout = layout.replace("\\space", " ").replace("\\number\\day", "{day}").replace("\\number\\year", "{year}")
+        return months, re.sub(r"\s+", " ", layout).strip()
+
+    def font_size(self, command: str) -> float | None:
+        """Point size a size command sets (``\\@setfontsize\\footnotesize{7}{8}``, ``\\@ixpt``)."""
+        for src in (self.source, *((self.base.source,) if self.base else ())):
+            m = None
+            for m in re.finditer(r"\\@setfontsize\s*\\" + re.escape(command) + r"\s*(\{[^}]*\}|\\@[a-z]+pt)", src):
+                pass  # the last definition wins
+            if not m:
+                continue
+            size = m.group(1).strip("{}")
+            if size.startswith("\\@"):
+                d = re.search(r"\\def\\" + re.escape(size[1:]) + r"\{([0-9.]+)\}", tex_source("latex.ltx"))
+                size = d.group(1) if d else ""
+            return tex_length(size if re.search(r"[a-z]", size) else size + "pt")
+        return None
+
+    def length(self, name: str) -> str | None:
+        return _assigned(self.source, name) or (self.base.length(name) if self.base else None)
 
     def name(self, macro: str) -> str | None:
         """LaTeX text of a name macro the class sets (``\\refname``, ``\\figurename``, ``\\keywordname`` ...)."""
@@ -523,9 +692,11 @@ class DocumentClass:
 def document_class(name: str, search_dirs: tuple[Path, ...] = ()) -> DocumentClass | None:
     """The document class source (``search_dirs`` first, then the TeX installation)."""
     try:
-        return DocumentClass(tex_source(f"{name}.cls", tuple(search_dirs)))
+        src = tex_source(f"{name}.cls", tuple(search_dirs))
     except FileNotFoundError:
         return None
+    base = re.search(r"\\LoadClass(?:\[[^]]*\])?\{([^}]+)\}", src)
+    return DocumentClass(src, document_class(base.group(1), search_dirs) if base else None)
 
 
 def _split_keyvals(text: str) -> list[str]:

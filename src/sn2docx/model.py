@@ -195,3 +195,4 @@ class Conversion:
     equal_mark: str | None = None  # LaTeX the document class appends for \equalcont
     # names the class and packages define (refname, figurename, ..., contributing, emailsep), plain text
     names: dict[str, str] = field(default_factory=dict)
+    doc_class: Any = None  # texdefs.DocumentClass: font sizes, \today, lengths

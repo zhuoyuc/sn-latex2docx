@@ -113,37 +113,6 @@ def num_pr(num_id: int, ilvl: int) -> etree._Element:
     return el("w:numPr", None, el("w:ilvl", {"w:val": str(ilvl)}), el("w:numId", {"w:val": str(num_id)}))
 
 
-def ppr(style: str | None = None, keep_next=False, jc: str | None = None, spacing: dict | None = None,
-        ind: dict | None = None, tabs: list[tuple[str, int]] | None = None, num: tuple[int, int] | None = None,
-        borders: dict | None = None) -> etree._Element:
-    """Paragraph properties in schema order."""
-    p = el("w:pPr")
-    if style:
-        p.append(el("w:pStyle", {"w:val": style}))
-    if keep_next:
-        p.append(el("w:keepNext"))
-    if num is not None:
-        p.append(num_pr(*num))
-    if borders:
-        b = el("w:pBdr")
-        for side in ("top", "left", "bottom", "right"):
-            if side in borders:
-                b.append(el(f"w:{side}", {"w:val": "single", "w:sz": str(borders[side]), "w:space": "1", "w:color": "000000"}))
-        p.append(b)
-    if tabs:
-        t = el("w:tabs")
-        for kind, pos in tabs:
-            t.append(el("w:tab", {"w:val": kind, "w:pos": str(pos)}))
-        p.append(t)
-    if spacing:
-        p.append(el("w:spacing", {f"w:{k}": str(v) for k, v in spacing.items()}))
-    if ind:
-        p.append(el("w:ind", {f"w:{k}": str(v) for k, v in ind.items()}))
-    if jc:
-        p.append(el("w:jc", {"w:val": jc}))
-    return p
-
-
 def paragraph(props: etree._Element | None, content: list[etree._Element]) -> etree._Element:
     p = el("w:p")
     if props is not None:
@@ -222,38 +191,11 @@ def plain_text(items) -> str:
     return re.sub(r"\s+", " ", "".join(parts)).strip()
 
 
-def drawing(rid: str, cx: int, cy: int, doc_id: int, name: str, descr: str) -> etree._Element:
-    """Inline picture, mirroring the structure used by the Word template."""
-    wp = NS["wp"]
-    a = NS["a"]
-    pic = NS["pic"]
-    r_ns = NS["r"]
-    d = el("w:drawing")
-    inline = etree.SubElement(d, "{%s}inline" % wp)
-    etree.SubElement(inline, "{%s}extent" % wp, cx=str(cx), cy=str(cy))
-    etree.SubElement(inline, "{%s}effectExtent" % wp, l="0", t="0", r="0", b="0")
-    etree.SubElement(inline, "{%s}docPr" % wp, id=str(doc_id), name=f"Picture {doc_id}", descr=descr)
-    gfp = etree.SubElement(inline, "{%s}cNvGraphicFramePr" % wp)
-    etree.SubElement(gfp, "{%s}graphicFrameLocks" % a, noChangeAspect="1")
-    graphic = etree.SubElement(inline, "{%s}graphic" % a)
-    gd = etree.SubElement(graphic, "{%s}graphicData" % a, uri="http://schemas.openxmlformats.org/drawingml/2006/picture")
-    p = etree.SubElement(gd, "{%s}pic" % pic)
-    nv = etree.SubElement(p, "{%s}nvPicPr" % pic)
-    etree.SubElement(nv, "{%s}cNvPr" % pic, id=str(doc_id), name=name, descr=descr)
-    cnv = etree.SubElement(nv, "{%s}cNvPicPr" % pic)
-    etree.SubElement(cnv, "{%s}picLocks" % a, noChangeAspect="1", noChangeArrowheads="1")
-    bf = etree.SubElement(p, "{%s}blipFill" % pic)
-    blip = etree.SubElement(bf, "{%s}blip" % a)
-    blip.set("{%s}embed" % r_ns, rid)
-    st = etree.SubElement(bf, "{%s}stretch" % a)
-    etree.SubElement(st, "{%s}fillRect" % a)
-    sp = etree.SubElement(p, "{%s}spPr" % pic, bwMode="auto")
-    xf = etree.SubElement(sp, "{%s}xfrm" % a)
-    etree.SubElement(xf, "{%s}off" % a, x="0", y="0")
-    etree.SubElement(xf, "{%s}ext" % a, cx=str(cx), cy=str(cy))
-    geom = etree.SubElement(sp, "{%s}prstGeom" % a, prst="rect")
-    etree.SubElement(geom, "{%s}avLst" % a)
-    etree.SubElement(sp, "{%s}noFill" % a)
-    r = el("w:r")
-    r.append(d)
-    return r
+def sort_ppr(ppr: etree._Element) -> None:
+    """Put a pPr's children into schema order."""
+    _sort_children(ppr, _PPR_ORDER)
+
+
+def sort_rpr(rpr: etree._Element) -> None:
+    """Put an rPr's children into schema order."""
+    _sort_children(rpr, _RPR_ORDER)

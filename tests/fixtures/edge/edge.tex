@@ -3,6 +3,7 @@
 \usepackage{amsmath}
 \usepackage{amsthm}
 \usepackage{subfig}
+\usepackage{svg}
 \newcommand{\vect}[1]{\mathbf{#1}}
 \newcommand{\sample}{Sample text}
 \newcommand{\figref}[1]{Fig.~\ref{#1}}
@@ -99,7 +100,7 @@ starts a new paragraph here.
 Panel~\ref{fig:nocap}. Named: \Cref{lem:first}, \cref{fig:sub} and \Cref{fig:sub,fig:svg}.
 
 \begin{figure}
-  \includegraphics{diagram}
+  \includesvg{diagram}
   \caption{A vector diagram supplied as SVG.}\label{fig:svg}
 \end{figure}
 

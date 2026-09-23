@@ -69,8 +69,10 @@ def test_partial_rules_map_to_rows_and_columns():
 def edge(tmp_path_factory):
     if shutil.which("pandoc") is None:
         pytest.skip("pandoc not installed")
-    return convert(ROOT / "tests/fixtures/edge/edge.tex", tmp_path_factory.mktemp("edge") / "edge.docx",
-                   tex_dirs=(ROOT / "templates/springer-nature",))
+    from tests.test_convert import edge_kit
+
+    tmp = tmp_path_factory.mktemp("edge")
+    return convert(edge_kit(tmp / "kit"), tmp / "edge.docx")
 
 
 def _paragraphs(path: Path) -> list[etree._Element]:
@@ -89,7 +91,12 @@ def test_theorem_heads_and_section_numbering(edge):
 def test_unnumbered_algorithm_keeps_indentation(edge):
     nested = next(p for p in _paragraphs(edge.output) if text_of(p) == "nested")
     ind = nested.find(f"{q('w:pPr')}/{q('w:ind')}")
-    assert ind is not None and ind.get(q("w:left")) == "360" and ind.get(q("w:hanging")) is None
+    # algorithmicx without line numbers: \labelwidth 0.5em + \labelsep 0.5em, then \algorithmicindent
+    from sn2docx.latex import texdefs
+
+    lay, em = texdefs.alg_layout(), 12.0  # the template's body size
+    width = sum(texdefs.tex_length(x, em) for x in (lay.labelwidth_plain, lay.labelsep, lay.indent))
+    assert ind is not None and ind.get(q("w:left")) == str(round(width * 20)) and ind.get(q("w:hanging")) is None
 
 
 def test_cmidrule_becomes_border_under_spanned_cells_only(edge):

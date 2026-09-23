@@ -14,8 +14,18 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
-SEARCH_EXTS = ("", ".pdf", ".png", ".jpg", ".jpeg", ".eps", ".ps", ".svg", ".tif", ".tiff", ".gif", ".bmp")
-DPI = 300
+
+
+@cache
+def search_extensions() -> tuple[str, ...]:
+    """The extensions graphicx tries for ``\\includegraphics{name}`` (``\\Gin@extensions`` of its driver)."""
+    from .latex.texdefs import tex_source
+
+    src = tex_source("pdftex.def")
+    exts = []
+    for m in re.finditer(r"\\Gin@extensions\{([^}]*)\}", src):
+        exts += re.findall(r"\.[A-Za-z0-9]+", m.group(1))
+    return ("", *dict.fromkeys(exts))
 
 
 @dataclass
@@ -29,7 +39,7 @@ class RasterImage:
 def resolve(source: str, search_dirs: list[Path]) -> Path | None:
     source = source.strip().strip('"')
     for d in search_dirs:
-        for ext in SEARCH_EXTS:
+        for ext in search_extensions():
             p = (d / (source + ext)) if ext else (d / source)
             if p.is_file():
                 return p
@@ -45,26 +55,26 @@ def _ghostscript() -> str | None:
     return None
 
 
-def _render(src: Path | bytes, page: int = 0, filetype: str = "pdf") -> RasterImage:
-    """Rasterise a vector page (PDF, or SVG) with PyMuPDF at :data:`DPI`."""
+def _render(src: Path | bytes, dpi: int, page: int = 0, filetype: str = "pdf") -> RasterImage:
+    """Rasterise a vector page (PDF, or SVG) with PyMuPDF."""
     import pymupdf
 
     doc = pymupdf.open(stream=src, filetype=filetype) if isinstance(src, bytes) else pymupdf.open(src, filetype=filetype)
     try:
         pg = doc[min(page, len(doc) - 1)]
-        pix = pg.get_pixmap(dpi=DPI, alpha=False)
+        pix = pg.get_pixmap(dpi=dpi, alpha=False)
         return RasterImage(pix.tobytes("png"), "png", pix.width, pix.height)
     finally:
         doc.close()
 
 
-def _eps_to_png(path: Path) -> RasterImage:
+def _eps_to_png(path: Path, dpi: int) -> RasterImage:
     gs = _ghostscript()
     if gs:
         with tempfile.TemporaryDirectory() as tmp:
             out = Path(tmp) / "out.png"
             cmd = [gs, "-q", "-dSAFER", "-dBATCH", "-dNOPAUSE", "-dEPSCrop", "-sDEVICE=png16m",
-                   f"-r{DPI}", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4", f"-sOutputFile={out}", str(path)]
+                   f"-r{dpi}", "-dTextAlphaBits=4", "-dGraphicsAlphaBits=4", f"-sOutputFile={out}", str(path)]
             res = subprocess.run(cmd, capture_output=True)
             if res.returncode == 0 and out.is_file():
                 return _raster_from_bytes(out.read_bytes())
@@ -75,7 +85,7 @@ def _eps_to_png(path: Path) -> RasterImage:
             out = Path(tmp) / "out.pdf"
             res = subprocess.run([epstopdf, str(path), f"--outfile={out}"], capture_output=True)
             if res.returncode == 0 and out.is_file():
-                return _render(out.read_bytes())
+                return _render(out.read_bytes(), dpi)
     raise RuntimeError(f"cannot convert {path}: no Ghostscript (gs/gswin64c/mgs) or epstopdf available")
 
 
@@ -100,7 +110,8 @@ def _raster_from_bytes(data: bytes, keep_jpeg: bool = False) -> RasterImage:
     return RasterImage(buf.getvalue(), "png", w, h)
 
 
-def load_image(path: Path, options: str | None = None) -> RasterImage:
+def load_image(path: Path, options: str | None, dpi: int) -> RasterImage:
+    """PNG or JPEG for Word; vector formats are rendered at ``dpi`` (the template's resolution)."""
     ext = path.suffix.lower()
     page = 0
     if options:
@@ -108,38 +119,7 @@ def load_image(path: Path, options: str | None = None) -> RasterImage:
         if m:
             page = int(m.group(1)) - 1
     if ext in (".pdf", ".svg"):
-        return _render(path, page, ext[1:])
+        return _render(path, dpi, page, ext[1:])
     if ext in (".eps", ".ps"):
-        return _eps_to_png(path)
+        return _eps_to_png(path, dpi)
     return _raster_from_bytes(path.read_bytes(), keep_jpeg=True)
-
-
-# TeX's unit keywords and the names pint gives the same units (the sizes come from pint)
-TEX_UNITS = {"in": "inch", "cm": "centimeter", "mm": "millimeter", "pt": "tex_point", "bp": "big_point",
-              "pc": "tex_pica", "dd": "didot", "cc": "cicero", "sp": "scaled_point"}
-
-
-@cache
-def _units():
-    import pint
-
-    return pint.UnitRegistry()
-
-
-def length_in(value: float, tex_unit: str) -> float:
-    """A TeX length in inches."""
-    return _units().Quantity(value, TEX_UNITS[tex_unit]).to("inch").magnitude
-
-
-def requested_width(options: str | None, text_width_in: float) -> float | None:
-    """Width asked for in ``\\includegraphics[width=...]``, in inches (None if not given)."""
-    if not options:
-        return None
-    m = re.search(r"(?<![a-z])width\s*=\s*([0-9.]*)\s*\\(textwidth|linewidth|columnwidth|hsize)", options)
-    if m:
-        f = float(m.group(1)) if m.group(1) else 1.0
-        return f * text_width_in
-    m = re.search(r"(?<![a-z])width\s*=\s*([0-9.]+)\s*(" + "|".join(TEX_UNITS) + ")", options)
-    if m:
-        return length_in(float(m.group(1)), m.group(2))
-    return None  # scale= and height= keep the default width

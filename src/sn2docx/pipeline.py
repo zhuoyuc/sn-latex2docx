@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import logging
-import shutil
 import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
 from .docx.package import Package, make_reference_doc
-from .docx.postprocess import Options, postprocess
+from .docx.postprocess import postprocess
 from .latex.preprocess import preprocess
 from .pandoc import resource_path, run_pandoc
 
@@ -27,19 +26,14 @@ def default_template() -> Path:
     return resource_path("template.docx")
 
 
-def convert(
-    source: Path,
-    output: Path | None = None,
-    template: Path | None = None,
-    figure_width: float | None = 3.25,
-    date: str | None = None,
-    keep_intermediate: Path | None = None,
-    tex_dirs: tuple[Path, ...] = (),
-) -> Result:
-    """Convert ``source`` (an sn-jnl .tex file) and return the output path plus warnings."""
+def convert(source: Path, output: Path | None = None) -> Result:
+    """Convert ``source`` (an sn-jnl .tex file in its complete template folder) to ``output``.
+
+    The output defaults to ``source`` with a .docx suffix. Everything else comes from the
+    manuscript, its folder, the TeX installation and the bundled Word template.
+    """
     source = Path(source).resolve()
     output = Path(output) if output else source.with_suffix(".docx")
-    template = Path(template) if template else default_template()
     warnings: list[str] = []
 
     class _Collector(logging.Handler):
@@ -51,19 +45,14 @@ def convert(
     root = logging.getLogger("sn2docx")
     root.addHandler(handler)
     try:
-        pre = preprocess(source, tuple(tex_dirs))
+        pre = preprocess(source)
         with tempfile.TemporaryDirectory(prefix="sn2docx-") as tmp:
             work = Path(tmp)
-            tpl = Package.open(template)
+            tpl = Package.open(default_template())
             ref = make_reference_doc(tpl, work / "reference.docx")
             raw = work / "pandoc.docx"
             run_pandoc(pre.pandoc_tex, pre.conversion, ref, raw, work)
-            if keep_intermediate:
-                keep_intermediate.mkdir(parents=True, exist_ok=True)
-                shutil.copy(work / "pandoc-input.tex", keep_intermediate / "pandoc-input.tex")
-                shutil.copy(raw, keep_intermediate / "pandoc.docx")
-            opts = Options(figure_width=figure_width, date=date)
-            postprocess(raw, output, pre.conversion, tpl, opts)
+            postprocess(raw, output, pre.conversion, tpl)
     finally:
         root.removeHandler(handler)
     return Result(output, list(dict.fromkeys(warnings)), pre.conversion.bibstyle)

@@ -15,7 +15,13 @@ from sn2docx.docx.verify import inspect
 from sn2docx.pipeline import convert, default_template
 
 ROOT = Path(__file__).resolve().parents[1]
-SN = (ROOT / "templates/springer-nature",)  # sn-jnl.cls and its .bst files
+
+
+def edge_kit(dest: Path) -> Path:
+    """The edge-case fixture as a complete manuscript folder (plus the official sn-jnl class)."""
+    shutil.copytree(ROOT / "tests/fixtures/edge", dest, dirs_exist_ok=True)
+    shutil.copy(ROOT / "templates/springer-nature/sn-jnl.cls", dest)
+    return dest / "edge.tex"
 pytestmark = pytest.mark.skipif(shutil.which("pandoc") is None, reason="pandoc not installed")
 
 
@@ -26,8 +32,7 @@ def out_dir(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def reference(out_dir):
-    return convert(ROOT / "examples/reference-manuscript/manuscript.tex", out_dir / "reference.docx", date="August 23, 2026",
-                   tex_dirs=SN)
+    return convert(ROOT / "examples/reference-manuscript/manuscript.tex", out_dir / "reference.docx")
 
 
 @pytest.fixture(scope="session")
@@ -37,7 +42,7 @@ def sample(out_dir):
 
 @pytest.fixture(scope="session")
 def edge(out_dir):
-    return convert(ROOT / "tests/fixtures/edge/edge.tex", out_dir / "edge.docx", tex_dirs=SN)
+    return convert(edge_kit(out_dir / "edge"), out_dir / "edge.docx")
 
 
 def _xml(path: Path, part: str = "word/document.xml"):
@@ -145,7 +150,12 @@ def test_reference_equation_paragraph_layout(reference):
 
 def test_header_date_and_properties(reference):
     hdr = _xml(reference.output, "word/header1.xml")
-    assert text_of(hdr) == "A PREPRINT - AUGUST 23, 2026"
+    # the template's sample date is replaced by today's, written as article.cls's \\today writes it
+    import datetime as dt
+    import calendar
+
+    today = dt.date.today()
+    assert text_of(hdr) == f"A PREPRINT - {calendar.month_name[today.month]} {today.day}, {today.year}".upper()
     core = _xml(reference.output, "docProps/core.xml")
     title = core.find("{http://purl.org/dc/elements/1.1/}title").text
     assert title == "A reference manuscript template for LaTeX to Word conversion"

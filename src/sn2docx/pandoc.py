@@ -64,3 +64,19 @@ def run_pandoc(tex: str, conv: Conversion, reference_doc: Path, out: Path, workd
             log.warning("pandoc: %s", line.strip())
     if res.returncode != 0:
         raise RuntimeError(f"pandoc failed with exit code {res.returncode}")
+
+
+@cache
+def default_style(style_id: str):
+    """A style from pandoc's own default reference.docx (e.g. its monospace ``VerbatimChar``)."""
+    import io
+    import zipfile
+
+    from lxml import etree
+
+    data = subprocess.run([pandoc_executable(), "--print-default-data-file", "reference.docx"],
+                          capture_output=True, check=True).stdout
+    with zipfile.ZipFile(io.BytesIO(data)) as z:
+        styles = etree.fromstring(z.read("word/styles.xml"))
+    w = "{http://schemas.openxmlformats.org/wordprocessingml/2006/main}"
+    return next((s for s in styles.iter(w + "style") if s.get(w + "styleId") == style_id), None)

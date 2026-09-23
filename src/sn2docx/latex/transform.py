@@ -75,7 +75,7 @@ def _letters(n: int) -> str:
     """1 -> A, 26 -> Z, 27 -> AA (appendix numbering)."""
     s = ""
     while n > 0:
-        n, r = divmod(n - 1, 26)
+        n, r = divmod(n - 1, len(string.ascii_uppercase))
         s = string.ascii_uppercase[r] + s
     return s
 
@@ -399,7 +399,7 @@ class Transformer:
         self.reg.figures.append(fig)
         # every sub-float gets a letter, as in LaTeX, whether or not it has a sub-caption
         for n, idx in enumerate(sub_panels):
-            panels[idx].letter = string.ascii_lowercase[n % 26]
+            panels[idx].letter = string.ascii_lowercase[n % len(string.ascii_lowercase)]
         for idx, lab in sub_labels:
             text = f"{number or ''}{panels[idx].letter}"
             panels[idx].bookmark = self._bind(lab, "subfigure", text).bookmark
