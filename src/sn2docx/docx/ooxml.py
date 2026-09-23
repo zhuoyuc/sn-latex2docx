@@ -77,7 +77,7 @@ def run(text: str = "", props: etree._Element | None = None, **kw) -> etree._Ele
 
 
 def special_run(tag: str | etree._Element, props: etree._Element | None = None) -> etree._Element:
-    """A run holding one non-text child (``w:tab``, ``w:br``, a ``w:fldChar`` …)."""
+    """A run holding one non-text child (``w:tab``, ``w:br``, a ``w:fldChar`` ...)."""
     r = el("w:r")
     if props is not None:
         r.append(copy.deepcopy(props))

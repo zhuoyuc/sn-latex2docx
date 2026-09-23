@@ -17,32 +17,17 @@ from pathlib import Path
 from lxml import etree
 
 from .. import images
+from ..latex import texdefs
 from ..latex.scan import latex_to_plain
 from ..model import MARKER_RE, Conversion, Label
 from . import ooxml as ox
+from .template_text import read_template_text
 from .ooxml import MK, MK_NS, el, q
 from .package import NS, Package
 
 log = logging.getLogger(__name__)
 
 EMU_PER_IN = 914400
-# Cross-reference type names for \cref / \Cref / \autoref.
-CREF_NAMES = {
-    "section": ("section", "Section"),
-    "appendix": ("appendix", "Appendix"),
-    "equation": ("Eq.", "Eq."),
-    "figure": ("Figure", "Figure"),
-    "subfigure": ("Figure", "Figure"),
-    "table": ("Table", "Table"),
-    "algorithm": ("Algorithm", "Algorithm"),
-    "line": ("line", "Line"),
-    "theorem": ("Theorem", "Theorem"),
-    "listing": ("Listing", "Listing"),
-}
-CREF_PLURALS = {"Eq.": "Eqs.", "section": "sections", "Section": "Sections", "appendix": "appendices",
-                "Appendix": "Appendices", "line": "lines", "Line": "Lines"}
-DAGGERS = ["†", "‡", "§", "¶", "‖"]
-
 
 @dataclass
 class Options:
@@ -73,6 +58,8 @@ class PostProcessor:
             if sz is not None and mar is not None:
                 self.text_width = int(sz.get(q("w:w"))) - int(mar.get(q("w:left"))) - int(mar.get(q("w:right")))
         self.appendix_num = 0
+        self.tt = read_template_text(template)  # the template's own labels and punctuation
+        self.names = conv.names  # the LaTeX class's and packages' names (plain text)
 
     @staticmethod
     def warn(msg: str) -> None:
@@ -84,8 +71,7 @@ class PostProcessor:
         max_id = 0
         for root in roots:
             normalise_markers(root)
-            kept = _remove_bookmarks(root, lambda name: name.startswith("ref-"))  # citeproc entries, renamed later
-            max_id = max([max_id, *kept])
+            _remove_bookmarks(root, lambda name: False)
         self.bm = ox.Bookmarks(max_id + 1)
         # block markers never move to another paragraph before their pass runs, so index them once
         self._markers: dict[str, list] = defaultdict(list)
@@ -99,8 +85,7 @@ class PostProcessor:
         self._pass_tables()
         self._pass_algorithms()
         self._pass_theorems()
-        self._pass_manual_bibliography()
-        self._pass_citeproc_bibliography()
+        self._pass_bibliography()
         for root in roots:
             self._pass_inline(root)
         self._style_lists()
@@ -160,12 +145,19 @@ class PostProcessor:
         self.our_bookmarks.add(name)
         return [s, *content, e]
 
-    def _seq(self, kind: str, number: str | None, bookmark: str | None, label: str) -> list[etree._Element]:
+    def _caption_parts(self, kind: str) -> tuple[str, str]:
+        """(label before the number, separator after it): the template's, else the class's name."""
+        if kind in self.tt.captions:
+            return self.tt.captions[kind]
+        seps = [sep for _, sep in self.tt.captions.values()]
+        return (self.names.get(kind + "name", "") + " ").lstrip(), seps[0] if seps else " "
+
+    def _seq(self, kind: str, number: str | None, bookmark: str | None) -> list[etree._Element]:
         """``Figure 1`` style caption lead: label text + bookmarked SEQ field."""
         hl = ox.rpr(style="Hyperlink")
         if number is None:
             return []
-        runs = [ox.run(f"{label} ", hl)]
+        runs = [ox.run(self._caption_parts(kind)[0], hl)] if self._caption_parts(kind)[0] else []
         runs += self._bookmark_wrap(bookmark, ox.field(f"SEQ {kind} \\* ARABIC", number, hl))
         return runs
 
@@ -234,7 +226,9 @@ class PostProcessor:
     def _style_lists(self) -> None:
         """Give pandoc's bullet lists the template's bullet glyphs and font."""
         num = self.pkg.xml("word/numbering.xml")
-        glyphs = ["•", "◦", "▪"]
+        bullets = self.tt.bullets
+        if not bullets:
+            return
         for a in num.findall(q("w:abstractNum")):
             for lvl in a.findall(q("w:lvl")):
                 fmt = lvl.find(q("w:numFmt"))
@@ -250,20 +244,22 @@ class PostProcessor:
                         ind.set(q("w:left"), str(left + 360))
                         ind.set(q("w:hanging"), "720")
                     continue
-                ilvl = int(lvl.get(q("w:ilvl")))
-                lvl.find(q("w:lvlText")).set(q("w:val"), glyphs[ilvl % 3])
+                glyph, fonts = bullets[int(lvl.get(q("w:ilvl"))) % len(bullets)]
+                lvl.find(q("w:lvlText")).set(q("w:val"), glyph)
                 old = lvl.find(q("w:rPr"))
                 if old is not None:
                     lvl.remove(old)
-                lvl.append(el("w:rPr", None, el("w:rFonts", {"w:ascii": "Times New Roman", "w:hAnsi": "Times New Roman",
-                                                              "w:cs": "Times New Roman", "w:eastAsia": "Times New Roman"})))
+                rfonts = etree.Element(q("w:rFonts"))
+                for k, v in fonts.items():
+                    rfonts.set(k, v)
+                lvl.append(el("w:rPr", None, rfonts))
 
     def _style_code_blocks(self) -> None:
         """Code blocks: single-spaced monospace via styles, not the body text they inherit.
 
         The template's *Verbatim Char* stays as it is (it also formats e-mail addresses);
         code runs get their own *Source Code Char* style, which pandoc's token styles
-        (``KeywordTok`` …) are re-based on, so users can restyle all code in one place.
+        (``KeywordTok`` ...) are re-based on, so users can restyle all code in one place.
         """
         mono = {"w:ascii": "Courier New", "w:hAnsi": "Courier New", "w:cs": "Courier New", "w:eastAsia": "Courier New"}
         size = (el("w:sz", {"w:val": "20"}), el("w:szCs", {"w:val": "20"}))
@@ -320,42 +316,49 @@ class PostProcessor:
             content: list[etree._Element] = []
             affil_num = {a.key: a.number for a in fm.affiliations}
             notes = self.conv.equal_notes
+            corr_mark = self.tt.corresponding_mark
+            equal_mark = _superscript_mark(self.conv.equal_mark)
+            email_sep = self.names.get("emailsep") or " "
+            author_sep = self.tt.author_sep or email_sep
             for i, a in enumerate(fm.authors):
                 content += runs_of(("FMAUTHOR", str(i)))
                 marks = [str(affil_num.get(k, k)) for k in a.affils]
-                if a.corresponding:
-                    marks.append("*")
-                if a.equal:
-                    marks.append(DAGGERS[notes.index(a.equal) % len(DAGGERS)])
+                if a.corresponding and corr_mark:
+                    marks.append(corr_mark)
+                if a.equal and equal_mark:
+                    marks.append(equal_mark)
                 if marks:
-                    content.append(ox.run(",".join(marks), sup=True))
+                    content.append(ox.run(author_sep.strip().join(marks), sup=True))
                 if i < len(fm.authors) - 1:
-                    content += [ox.run(","), ox.run(" ")]
+                    content.append(ox.run(author_sep))
             for i, aff in sorted(enumerate(fm.affiliations), key=lambda t: t[1].number):
                 content += [ox.special_run("w:br"), ox.run(" "), ox.run(str(aff.number), sup=True)]
                 content += runs_of(("FMAFFIL", str(i)))
             corr = [e for a in fm.authors if a.corresponding for e in a.emails]
             others = [e for a in fm.authors if not a.corresponding for e in a.emails]
-            if corr:
-                content += [ox.special_run("w:br"), ox.run(" "), ox.run("*", sup=True), ox.run("Corresponding author:"), ox.run(" ")]
-                for j, e in enumerate(corr):
+            for mark, label, emails in ((corr_mark, self.tt.corresponding, corr),
+                                        ("", self.names.get("contributing", ""), others)):
+                if not emails:
+                    continue
+                content += [ox.special_run("w:br"), ox.run(" ")]
+                if mark:
+                    content.append(ox.run(mark, sup=True))
+                if label:
+                    content += [ox.run(label), ox.run(" ")]
+                for j, e in enumerate(emails):
                     if j:
-                        content.append(ox.run("; "))
+                        content.append(ox.run(email_sep))
                     content.append(ox.run(e, style="VerbatimChar"))
-            if others:
-                content += [ox.special_run("w:br"), ox.run(" "), ox.run("Contributing authors:"), ox.run(" ")]
-                for j, e in enumerate(others):
-                    if j:
-                        content.append(ox.run("; "))
-                    content.append(ox.run(e, style="VerbatimChar"))
-            for i, _ in enumerate(notes):
-                content += [ox.special_run("w:br"), ox.run(" "), ox.run(DAGGERS[i % len(DAGGERS)], sup=True)]
+            for i, _ in enumerate(notes):  # sn-jnl marks every equal contribution alike
+                content += [ox.special_run("w:br"), ox.run(" ")]
+                if equal_mark:
+                    content.append(ox.run(equal_mark, sup=True))
                 content += runs_of(("FMNOTE", str(i)))
             new.append(ox.paragraph(ox.ppr("Author"), content))
 
         abs_p = found.get(("FMABSTRACT", ""))
         if abs_p is not None:
-            new.append(ox.paragraph(ox.ppr("AbstractTitle"), [ox.run("Abstract")]))
+            new.append(ox.paragraph(ox.ppr("AbstractTitle"), [ox.run(self.tt.abstract or self.names.get("abstractname", ""))]))
             cur = abs_p.getnext()
             stop = {found.get(("FMKEYWORDS", "")), end}
             while cur is not None and cur not in stop:
@@ -366,7 +369,8 @@ class PostProcessor:
                 cur = nxt
         kw = runs_of(("FMKEYWORDS", ""))
         if kw:
-            new.append(ox.paragraph(ox.ppr("FirstParagraph"), [ox.run("Keywords:", bold=True), ox.run(" "), *kw]))
+            label = self.tt.keywords or self.names.get("keywordname", "")
+            new.append(ox.paragraph(ox.ppr("FirstParagraph"), [ox.run(label, bold=self.tt.keywords_bold), ox.run(" "), *kw]))
 
         # replace the original block (start marker .. end marker) by the new paragraphs
         i0 = self.body.index(start)
@@ -380,6 +384,8 @@ class PostProcessor:
             h = self.reg.headings[j]
             mk.getparent().remove(mk)
             items = ox.strip_leading_space(ox.content_children(p))
+            if h.role == "references":
+                items = [ox.run(self.tt.references or self.names.get("refname", ""))]
             for c in ox.content_children(p):
                 p.remove(c)
             if not h.numbered:
@@ -409,13 +415,16 @@ class PostProcessor:
             content: list[etree._Element] = list(maths)
             content.append(ox.special_run("w:tab"))
             if eq.number is not None:
-                content.append(ox.run("("))
+                opening, closing = self.tt.equation
+                if opening:
+                    content.append(ox.run(opening))
                 if eq.tag:
                     num_runs = [ox.run(eq.number)]
                 else:
                     num_runs = ox.field("SEQ equation \\* ARABIC", eq.number)
                 content += self._bookmark_wrap(eq.bookmark, num_runs)
-                content.append(ox.run(")"))
+                if closing:
+                    content.append(ox.run(closing))
             new = ox.paragraph(props, content)
             # any text pandoc left in the math paragraph (unlikely) goes after the equation
             nxt.addprevious(new)
@@ -485,12 +494,13 @@ class PostProcessor:
                         paras[0].append(c)
                 new += paras
                 if idx in subcaps:
-                    runs = [ox.run(f"({panel.letter}) ")] + self._content_without_marker(subcaps[idx])
+                    label = latex_to_plain(texdefs.subcaption_label().replace("#2", panel.letter), strip=False)
+                    runs = [ox.run(label)] + self._content_without_marker(subcaps[idx])
                     new.append(ox.paragraph(ox.ppr("Compact", keep_next=True, jc="center"),
                                             self._bookmark_wrap(panel.bookmark, runs)))
             if caption is not None:
-                runs = self._seq("figure", fig.number, fig.bookmark, "Figure")
-                runs.append(ox.run(": "))
+                runs = self._seq("figure", fig.number, fig.bookmark)
+                runs.append(ox.run(self._caption_parts("figure")[1]))
                 runs += self._content_without_marker(caption)
                 new.append(ox.paragraph(ox.ppr("ImageCaption"), runs))
             elif new:
@@ -592,7 +602,8 @@ class PostProcessor:
                 elif name == "TABNOTE":
                     notes.append(b)
             cap_runs = self._content_without_marker(caption) if caption is not None else []
-            cap_text = f"Table {tab.number}: {ox.plain_text(cap_runs)}" if tab.number else None
+            label, sep = self._caption_parts("table")
+            cap_text = f"{label}{tab.number}{sep}{ox.plain_text(cap_runs)}" if tab.number else None
             new: list[etree._Element] = []
             for t in tables:
                 self._style_table(t, cap_text)
@@ -606,8 +617,8 @@ class PostProcessor:
                            spacing={"before": "0", "after": "0", "line": "240", "lineRule": "auto"}),
                     [_resize(r, 20) for r in self._content_without_marker(n)]))
             if caption is not None:
-                runs = self._seq("table", tab.number, tab.bookmark, "Table")
-                runs.append(ox.run(": "))
+                runs = self._seq("table", tab.number, tab.bookmark)
+                runs.append(ox.run(sep))
                 runs += cap_runs
                 new.append(ox.paragraph(ox.ppr("TableCaption"), runs))
             if not tables and not tab.panels:
@@ -633,7 +644,7 @@ class PostProcessor:
             new: list[etree._Element] = []
             if caption is not None:
                 bold = ox.rpr(bold=True)
-                runs = [ox.run("Algorithm ", bold)]
+                runs = [ox.run(self.names.get("algorithmname", "") + " ", bold)]
                 runs += self._bookmark_wrap(alg.bookmark, ox.field("SEQ algorithm \\* ARABIC", alg.number or "", bold))
                 runs.append(ox.run(" "))
                 runs += self._content_without_marker(caption)
@@ -647,7 +658,7 @@ class PostProcessor:
                 left = gutter + 360 * indent
                 runs = []
                 if numbered:
-                    runs += [ox.run(f"{lineno}:" if lineno else "", size=18), ox.special_run("w:tab")]
+                    runs += [ox.run(self._alg_lineno(lineno), size=18), ox.special_run("w:tab")]
                 runs += self._content_without_marker(b)
                 last = n == len(lines) - 1
                 props = ox.ppr("Compact", keep_next=not last, jc="left",
@@ -658,13 +669,6 @@ class PostProcessor:
             _replace_block(block, new)
 
     # ============================================================== theorems
-    _THEOREM_FONTS = {  # style -> (head bold, head italic, body italic), as in amsthm / sn-jnl
-        "plain": (True, False, True),
-        "definition": (True, False, False),
-        "remark": (False, True, False),
-        "roman-head": (False, False, True),
-    }
-
     def _pass_theorems(self) -> None:
         for mk, p in self._marker_paragraphs("THM"):
             k = self._args(mk)[0]
@@ -672,14 +676,17 @@ class PostProcessor:
             block = self._block(p, "THMEND", k)
             note = next((b for name, _, b in self._block_markers(block) if name == "THMNOTE"), None)
             body = [b for b in block[1:-1] if b is not note]
-            head_bold, head_italic, body_italic = self._THEOREM_FONTS.get(thm.style, self._THEOREM_FONTS["plain"])
-            head_font = ox.rpr(bold=head_bold, italic=head_italic)
+            style = thm.style  # texdefs.ThmStyle, from the class or amsthm
+            head_font = ox.rpr(bold=style.head_bold, italic=style.head_italic)
             head = [ox.run(thm.head, head_font)]
             if note is not None:
-                head += [ox.run(" (")] + self._content_without_marker(note) + [ox.run(")")]
-            head.append(ox.run(".", head_font))
+                head += [ox.run(" " + latex_to_plain(style.note_open, strip=False).lstrip())]
+                head += self._content_without_marker(note) + [ox.run(latex_to_plain(style.note_close, strip=False))]
+            punct = latex_to_plain(style.punct)
+            if punct:
+                head.append(ox.run(punct, head_font))
             head.append(ox.run(" "))
-            if body_italic:
+            if style.body_italic:
                 for b in body:
                     if _is_equation(b):  # equation numbers stay upright, as in LaTeX
                         continue
@@ -703,46 +710,22 @@ class PostProcessor:
             _replace_block(block, new)
 
     # ========================================================== bibliography
-    def _pass_manual_bibliography(self) -> None:
+    def _pass_bibliography(self) -> None:
+        nb = self.conv.natbib
         for mk, p in self._marker_paragraphs("BIB"):
             n = self._args(mk)[0]
             runs = self._content_without_marker(p)
-            label = [] if self.conv.citation_mode == "author-year" else [ox.run(f"[{n + 1}] ")]
+            label = []
+            if nb is not None and nb.numbers and nb.biblabel:
+                label = [ox.run(latex_to_plain(nb.biblabel.replace("#1", str(n + 1))) + " ")]
             new = ox.paragraph(_bib_ppr(), self._bookmark_wrap(f"bibref_{n + 1}", label + runs))
             p.addprevious(new)
             p.getparent().remove(p)
 
-    def _pass_citeproc_bibliography(self) -> None:
-        bib_paras = [p for p in self.body.iter(q("w:p")) if ox.para_style(p) == "Bibliography"]
-        if not bib_paras:
-            return
-        # map pandoc's ref-KEY bookmarks to bibref_N in bibliography order
-        mapping: dict[str, str] = {}
-        for n, p in enumerate(bib_paras, 1):
-            start = p.getprevious()
-            key = None
-            while start is not None and start.tag == q("w:bookmarkStart"):
-                name = start.get(q("w:name"), "")
-                if name.startswith("ref-"):
-                    key = name
-                    break
-                start = start.getprevious()
-            new_name = f"bibref_{n}"
-            if key:
-                mapping[key] = new_name
-            content = ox.content_children(p)
-            for c in content:
-                p.remove(c)
-            for c in self._bookmark_wrap(new_name, content):
-                p.append(c)
-            p.replace(p.find(q("w:pPr")), _bib_ppr())
-        for root in self.roots:
-            for h in root.iter(q("w:hyperlink")):
-                anchor = h.get(q("w:anchor"))
-                if anchor in mapping:
-                    h.set(q("w:anchor"), mapping[anchor])
-                    for r in h.findall(q("w:r")):
-                        _set_rpr(r, ox.rpr(style="Hyperlink", color="000000", base=_strip_color(r.find(q("w:rPr")))))
+    def _alg_lineno(self, lineno: int) -> str:
+        """algorithmicx prints line numbers with ``\\alglinenumber``."""
+        fmt = texdefs.algorithmic().linenumber
+        return latex_to_plain(fmt.replace("#1", str(lineno))) if lineno else ""
 
     # ============================================================ inline marks
     def _pass_inline(self, root) -> None:
@@ -775,8 +758,9 @@ class PostProcessor:
         lab = self.reg.labels.get(label)
         if lab is None:
             return "??"
-        prefix, parens = format_ref(lab, variant, self.conv.cref_names)
-        number = f"({lab.text})" if parens else lab.text
+        prefix, parens = format_ref(lab, variant, self.conv.cref_names, self.conv.cref_parens)
+        opening, closing = self.tt.equation if parens else ("", "")
+        number = f"{opening}{lab.text}{closing}"
         return f"{prefix} {number}" if prefix else number
 
     def _ref_runs(self, i: int, base) -> list[etree._Element]:
@@ -787,11 +771,12 @@ class PostProcessor:
             return [ox.run("??", base) if base is not None else ox.run("??", bold=True)]
         hl = ox.rpr(style="Hyperlink", base=_strip_color(base))
         runs: list[etree._Element] = []
-        prefix, parens = format_ref(lab, variant, self.conv.cref_names)
+        prefix, parens = format_ref(lab, variant, self.conv.cref_names, self.conv.cref_parens)
+        opening, closing = self.tt.equation if parens else ("", "")
         if prefix:
             runs.append(ox.run(f"{prefix} ", hl))
-        if parens:
-            runs.append(ox.run("(", hl))
+        if opening:
+            runs.append(ox.run(opening, hl))
         if lab.field and lab.bookmark:
             switches = "\\w \\h" if lab.kind in ("section", "appendix") else "\\h"
             runs += ox.field(f"REF {lab.bookmark} {switches} \\* MERGEFORMAT", lab.text or "??", hl)
@@ -801,13 +786,14 @@ class PostProcessor:
             runs.append(h)
         else:
             runs.append(ox.run(lab.text or "??", hl))
-        if parens:
-            runs.append(ox.run(")", hl))
+        if closing:
+            runs.append(ox.run(closing, hl))
         return runs
 
     def _cite_runs(self, i: int, base) -> list[etree._Element]:
-        """Citation against a ``thebibliography`` list (natbib semantics, numeric or author-year)."""
+        """A natbib citation, punctuated as natbib's options and ``\\setcitestyle`` make it."""
         command, keys, pre, post = self.reg.cites[i]
+        nb = self.conv.natbib
         hl = ox.rpr(style="Hyperlink", color="000000", base=_strip_color(base))
         plain = copy.deepcopy(base) if base is not None else None
         nums = []
@@ -819,6 +805,15 @@ class PostProcessor:
         pre = latex_to_plain(pre) if pre else ""
         post = latex_to_plain(post) if post else ""
 
+        def punct(name: str) -> str:
+            return latex_to_plain(nb.get(name), strip=False) if nb is not None else ""
+
+        opening, closing, sep, cmt = punct("NAT@open"), punct("NAT@close"), punct("NAT@sep").strip(), punct("NAT@cmt")
+        aysep = punct("NAT@aysep").strip()
+        numbers = nb is not None and nb.numbers
+        superscript = nb is not None and nb.superscript
+        between = sep + ("" if superscript else " ")
+
         def link(n: int, text: str) -> etree._Element:
             h = el("w:hyperlink", {"w:anchor": f"bibref_{n}"})
             h.append(ox.run(text, hl))
@@ -826,33 +821,49 @@ class PostProcessor:
 
         def who_year(n: int) -> tuple[str, str]:
             key = self.reg.bibitems[n - 1]
-            label = self.reg.bib_labels.get(key, "")
-            m = re.match(r"\{?(.*?)\((\d{4}[a-z]?)\)(.*)\}?$", label)
-            return (latex_to_plain(m.group(1)), m.group(2)) if m else (latex_to_plain(label) or key, "")
+            who, year = self.reg.bib_labels.get(key, (key, ""))
+            return latex_to_plain(who), latex_to_plain(year)
+
+        def wrap(inner: list[etree._Element], paren: bool = True) -> list[etree._Element]:
+            if not paren:
+                return inner
+            head = opening + (f"{pre} " if pre else "")
+            tail = (f"{cmt}{post}" if post else "") + closing
+            return ([ox.run(head, plain)] if head else []) + inner + ([ox.run(tail, plain)] if tail else [])
 
         if command in ("citeauthor", "citeyear", "citeyearpar"):
+            parts = [link(n, who_year(n)[0 if command == "citeauthor" else 1]) for n in nums]
+            return wrap(_joined(parts, between, plain), command == "citeyearpar")
+
+        textual = command in ("citet", "citealt", "textcite")
+        paren = command not in ("citealp", "citealt", "citenum")
+        if numbers:
+            order = sorted(set(nums)) if nb.sort else list(dict.fromkeys(nums))
+            spans = _ranges(order) if nb.compress else [(n, n) for n in order]
+            dash = latex_to_plain(nb.range_dash)
+            if textual:  # Knuth [1]
+                parts: list[etree._Element] = []
+                for n in nums:
+                    parts += [link(n, who_year(n)[0]), ox.run(" ", plain), *wrap([link(n, str(n))], paren)]
+                    parts.append(ox.run(between, plain))
+                return parts[:-1]
+            items = [link(a, str(a) if a == b else f"{a}{dash}{b}") for a, b in spans]
+            runs = _joined(items, between, plain)
+            if superscript and command not in ("citenum",):
+                return [_superscript_run(r) for r in runs]
+            return wrap(runs, paren)
+        if textual:  # Knuth (1984, p. 5)
             parts = []
             for n in nums:
                 who, year = who_year(n)
-                parts.append(link(n, who if command == "citeauthor" else year))
-            runs = _joined(parts, ", ", plain)
-            return [ox.run("(", plain), *runs, ox.run(")", plain)] if command == "citeyearpar" else runs
-
-        textual = command in ("citet", "textcite")
-        if self.conv.citation_mode == "author-year":
-            if textual:  # Knuth (1984, p. 5)
-                parts = []
-                for n in nums:
-                    who, year = who_year(n)
-                    parts += [link(n, who), ox.run(f" ({year}", plain), ox.run(f", {post})" if post else ")", plain)]
-                    parts.append(ox.run(", ", plain))
-                return parts[:-1]
-            items = [link(n, "%s, %s" % who_year(n)) for n in nums]
-            runs = [ox.run("(" + (f"{pre} " if pre else ""), plain), *_joined(items, "; ", plain)]
-            return runs + [ox.run((f", {post}" if post else "") + ")", plain)]
-        items = [link(a, str(a) if a == b else f"{a}–{b}") for a, b in _ranges(sorted(set(nums)))]
-        runs = [ox.run("[" + (f"{pre} " if pre else ""), plain), *_joined(items, ", ", plain)]
-        return runs + [ox.run((f", {post}" if post else "") + "]", plain)]
+                parts += [link(n, who), ox.run(" ", plain), *wrap([link(n, year)], paren)]
+                parts.append(ox.run(between, plain))
+            return parts[:-1]
+        items = []
+        for n in nums:
+            who, year = who_year(n)
+            items.append(link(n, f"{who}{aysep} {year}"))
+        return wrap(_joined(items, between, plain), paren)
 
     # ============================================================ properties
     def _header_and_properties(self) -> None:
@@ -874,7 +885,7 @@ class PostProcessor:
             _set_child(core, "dc:title", title)
             _set_child(core, "dc:creator", "; ".join(authors))
             _set_child(core, "cp:lastModifiedBy", authors[0] if authors else "")
-            _set_child(core, "cp:keywords", "; ".join(latex_to_plain(k) for k in fm.keywords))
+            _set_child(core, "cp:keywords", latex_to_plain(fm.keywords))
             _set_child(core, "dc:language", "en-US")
             for tag in ("dcterms:created", "dcterms:modified"):
                 e = _set_child(core, tag, now)
@@ -904,7 +915,7 @@ _BLOCK_MARKERS = {
 
 
 def normalise_markers(root: etree._Element) -> None:
-    """Split ``@@NAME…@@`` text inside runs into standalone marker elements."""
+    """Split ``@@NAME...@@`` text inside runs into standalone marker elements."""
     for t in list(root.iter(q("w:t"))):
         text = t.text or ""
         if "@@" not in text or not MARKER_RE.search(text):
@@ -974,31 +985,42 @@ def _cell_border(tc: etree._Element, side: str, sz: int) -> None:
     b.append(el(f"w:{side}", {"w:val": "single", "w:sz": str(sz), "w:space": "0", "w:color": "000000"}))
 
 
-def format_ref(lab: Label, variant: str, overrides: dict[str, dict[str, tuple[str, str]]] | None = None) -> tuple[str, bool]:
+def format_ref(lab: Label, variant: str, names: dict[str, dict[str, tuple[str, str]]],
+               parens_types: set[str]) -> tuple[str, bool]:
     """Type-name prefix (may be empty) and whether the number is parenthesised.
 
     ``variant`` comes from :func:`sn2docx.latex.transform.replace_refs`: ``ref``,
-    ``eq``, ``cref``/``Cref`` (``+`` suffix: plural) or ``bare``. Names declared with
-    ``\\crefname``/``\\Crefname`` (``overrides``) win over the built-in ones.
+    ``eq``, ``cref``/``Cref`` (``+`` suffix: plural) or ``bare``. ``names`` are
+    cleveref's (after the manuscript's ``\\crefname``s); theorem-like environments
+    cleveref does not know use their own title.
     """
     prefix = ""
     style = variant.rstrip("+")
+    types = [t for t in (lab.ref_type, lab.kind) if t]
     if style in ("cref", "Cref"):
         plural = variant.endswith("+")
-        declared = next((overrides[t][style] for t in (lab.ref_type, lab.kind)
-                         if t and overrides and style in overrides.get(t, {})), None)
-        if declared is not None:
-            prefix = declared[1] if plural else declared[0]
-        else:
-            if lab.type_name:  # theorem-like environments use their own title ("Lemma")
-                prefix = lab.type_name
-            else:
-                names = CREF_NAMES.get(lab.kind, (lab.kind, lab.kind.capitalize()))
-                prefix = names[0] if style == "cref" else names[1]
-            if plural:
-                prefix = CREF_PLURALS.get(prefix, prefix + "s")
-    parens = variant == "eq" or (variant != "ref" and lab.kind == "equation")
+        entry = next((names[t][style] for t in types if style in names.get(t, {})), None)
+        if entry is not None:
+            prefix = entry[1] if plural else entry[0]
+        elif lab.type_name:
+            prefix = lab.type_name
+    parens = variant == "eq" or (variant != "ref" and any(t in parens_types for t in types))
     return prefix, parens
+
+
+def _superscript_mark(latex: str | None) -> str:
+    """Plain text of a mark the class sets as a superscript (``$^{\\dagger}$``)."""
+    if not latex:
+        return ""
+    m = re.fullmatch(r"\s*\$\s*\^\s*\{?(.*?)\}?\s*\$\s*", latex)
+    return latex_to_plain(f"${m.group(1)}$" if m else latex)
+
+
+def _superscript_run(r: etree._Element) -> etree._Element:
+    runs = [r] if r.tag == q("w:r") else list(r.iter(q("w:r")))
+    for run in runs:
+        _set_rpr(run, ox.rpr(sup=True, base=run.find(q("w:rPr"))))
+    return r
 
 
 def _set_rpr(r: etree._Element, new: etree._Element | None) -> etree._Element:

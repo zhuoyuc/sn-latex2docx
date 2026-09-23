@@ -10,8 +10,8 @@ import pytest
 from lxml import etree
 
 from sn2docx.docx.package import q, text_of
-from sn2docx.latex.extras import mhchem_to_math, rewrite_textual_citations
-from sn2docx.latex.preprocess import _SKIP_RE, _manual_citations
+from sn2docx.latex.extras import mhchem_to_math
+from sn2docx.latex.preprocess import _SKIP_RE, _citations
 from sn2docx.latex.scan import strip_comments
 from sn2docx.latex.transform import Transformer, _longtable_heads, partial_rules
 from sn2docx.model import Registry
@@ -28,12 +28,6 @@ def test_one_row_align_is_valid_display_math():
 
 def test_comment_before_blank_line_keeps_paragraph_break():
     assert strip_comments("foo % c\n\nbar").count("\n\n") == 1
-
-
-def test_citet_single_optional_argument_is_postnote():
-    bib = {"k": (["Smith"], "2020")}
-    assert rewrite_textual_citations(r"\citet[p.~5]{k}", bib) == r"Smith~\cite[p.~5]{k}"
-    assert rewrite_textual_citations(r"\citet[see][p.~5]{k}", bib) == r"Smith~\cite[see][p.~5]{k}"
 
 
 def test_longtable_drops_continuation_head_and_feet():
@@ -58,9 +52,9 @@ def test_vskip_dimension_is_removed():
     assert _SKIP_RE.sub("", r"a\vskip 6pt plus 2pt b \hskip-1em c \kern\parindent d") == "a b  c  d"
 
 
-def test_manual_citations_keep_notes_and_command():
+def test_citations_keep_notes_and_command():
     reg = Registry()
-    _manual_citations(r"\citep[see][p.~5]{k} \citeauthor{k} \citep[p.~9]{k}", reg)
+    _citations(r"\citep[see][p.~5]{k} \citeauthor{k} \citep[p.~9]{k}", reg)
     assert reg.cites == [("citep", ["k"], "see", "p.~5"), ("citeauthor", ["k"], None, None),
                          ("citep", ["k"], None, "p.~9")]
 
@@ -75,7 +69,8 @@ def test_partial_rules_map_to_rows_and_columns():
 def edge(tmp_path_factory):
     if shutil.which("pandoc") is None:
         pytest.skip("pandoc not installed")
-    return convert(ROOT / "tests/fixtures/edge/edge.tex", tmp_path_factory.mktemp("edge") / "edge.docx")
+    return convert(ROOT / "tests/fixtures/edge/edge.tex", tmp_path_factory.mktemp("edge") / "edge.docx",
+                   tex_dirs=(ROOT / "templates/springer-nature",))
 
 
 def _paragraphs(path: Path) -> list[etree._Element]:
@@ -85,7 +80,8 @@ def _paragraphs(path: Path) -> list[etree._Element]:
 
 def test_theorem_heads_and_section_numbering(edge):
     texts = [text_of(p).replace("\u00a0", " ") for p in _paragraphs(edge.output)]
-    assert any(t.startswith("Definition 3.1 (Charge). Ions such as") for t in texts)
+    # sn-jnl's thmstylethree sets no punctuation after the head; amsthm's plain style a period
+    assert any(t.startswith("Definition 3.1 (Charge) Ions such as") for t in texts)
     assert "See Definition 3.1." in texts
     assert any(t.startswith("Lemma 1. A lemma") for t in texts)
 
@@ -108,7 +104,7 @@ def test_cmidrule_becomes_border_under_spanned_cells_only(edge):
 
 def test_manual_citation_notes_rendered(edge):
     joined = " ".join(text_of(p) for p in _paragraphs(edge.output))
-    assert "(see Knuth, 1984, p. 5)" in joined.replace("\u00a0", " ")
+    assert "(see Knuth 1984, p. 5)" in joined.replace("\u00a0", " ")
     assert "author only: Lamport; year only: 1984." in joined
 
 

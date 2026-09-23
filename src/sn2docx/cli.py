@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 from . import __version__
-from .images import UNIT_IN
+from .images import TEX_UNITS, length_in
 from .pipeline import convert
 
 
@@ -18,10 +18,10 @@ def _width(value: str) -> float | None:
     v = value.lower().strip()
     if v in ("source", "latex", "auto"):
         return None
-    m = re.fullmatch(r"([0-9.]+)\s*(in|cm|mm|pt|bp|pc)?", v)
+    m = re.fullmatch(r"([0-9.]+)\s*(" + "|".join(TEX_UNITS) + ")?", v)
     if not m:
         raise argparse.ArgumentTypeError(f"invalid width: {value}")
-    return float(m.group(1)) * UNIT_IN[m.group(2) or "in"]
+    return length_in(float(m.group(1)), m.group(2) or "in")
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -37,7 +37,9 @@ def main(argv: list[str] | None = None) -> int:
     ap.add_argument("--figure-width", type=_width, default=3.25, metavar="W",
                     help="uniform figure width, e.g. 3.25in or 8cm; 'source' keeps the LaTeX widths (default: 3.25in)")
     ap.add_argument("--date", help="date shown in the page header (default: \\date or today)")
-    ap.add_argument("--csl", type=Path, help="custom CSL style for the bibliography")
+    ap.add_argument("--tex-dir", type=Path, action="append", default=[], metavar="DIR",
+                    help="folder with the document class and .bst files when they are neither next to the "
+                    "manuscript nor installed in the TeX distribution (repeatable)")
     ap.add_argument("--keep-intermediate", type=Path, metavar="DIR",
                     help="write the pandoc input and raw pandoc output to DIR for debugging")
     ap.add_argument("--check", action="store_true",
@@ -51,14 +53,15 @@ def main(argv: list[str] | None = None) -> int:
         print(f"error: {args.source} does not exist", file=sys.stderr)
         return 2
     try:
-        res = convert(args.source, args.output, args.template, args.figure_width, args.date, args.csl,
-                      args.keep_intermediate)
+        res = convert(args.source, args.output, args.template, args.figure_width, args.date,
+                      args.keep_intermediate, tuple(args.tex_dir))
     except Exception as exc:  # report cleanly on the command line
         logging.getLogger("sn2docx").debug("conversion failed", exc_info=True)
         print(f"error: {exc}", file=sys.stderr)
         return 1
     if not args.quiet:
-        print(f"wrote {res.output} ({res.citation_mode} citations, {len(res.warnings)} warning(s))")
+        style = f"{res.bibstyle}.bst, " if res.bibstyle else ""
+        print(f"wrote {res.output} ({style}{len(res.warnings)} warning(s))")
     if args.check:
         from .docx.verify import inspect
 

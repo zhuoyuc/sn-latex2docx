@@ -2,17 +2,11 @@
 
 from pathlib import Path
 
-from sn2docx.latex.extras import (
-    author_text,
-    format_number,
-    format_unit,
-    mhchem_to_math,
-    read_bib_authors,
-    rewrite_packages,
-    rewrite_textual_citations,
-)
+from sn2docx.latex import texdefs
+from sn2docx.latex.bibliography import cited_keys, parse_thebibliography, run_bibtex
+from sn2docx.latex.extras import group_digits, mhchem_to_math, rewrite_packages, rewrite_unit
 from sn2docx.latex.frontmatter import extract_frontmatter
-from sn2docx.latex.preprocess import citation_mode, parse_theorems
+from sn2docx.latex.preprocess import parse_theorems
 from sn2docx.latex.source import collect_macros, expand_macros
 from sn2docx.latex.transform import (
     Transformer,
@@ -25,6 +19,7 @@ from sn2docx.latex.transform import (
 from sn2docx.model import MARKER_RE, Registry
 
 ROOT = Path(__file__).resolve().parents[1]
+SN = ROOT / "templates/springer-nature"
 
 
 def walk(body: str, theorems=None) -> tuple[str, Registry]:
@@ -45,24 +40,41 @@ def test_sn_frontmatter():
 \keywords{one, two, three}
 \maketitle
 Body."""
-    fm, _, rest = extract_frontmatter("", body)
+    fm, _, rest = extract_frontmatter("", body, texdefs.document_class("sn-jnl", (SN,)))
     assert fm.title == r"Full \emph{title}" and fm.short_title == "Short"
     assert [a.corresponding for a in fm.authors] == [True, False]
     assert fm.authors[0].affils == ["1", "2"] and fm.authors[0].emails == ["a@x.org"]
     assert fm.authors[1].equal == "Equal."
     assert [a.number for a in fm.affiliations] == [1, 2]
     assert "Street" in fm.affiliations[0].text and "orgname" not in fm.affiliations[0].text
-    assert fm.keywords == ["one", "two", "three"]
+    assert fm.keywords == "one, two, three"
     assert "\\title" not in rest and "Body." in rest
 
 
-def test_citation_mode_from_class_options():
-    assert citation_mode(["pdflatex", "sn-mathphys-num"], None) == "numeric"
-    assert citation_mode(["sn-mathphys-ay"], None) == "author-year"
-    assert citation_mode(["sn-basic"], None) == "author-year"
-    assert citation_mode(["sn-basic", "Numbered"], None) == "numeric"
-    assert citation_mode([], "plainnat") == "numeric"
-    assert citation_mode([], "sn-chicago") == "author-year"
+def test_reference_style_from_class_options():
+    cls = texdefs.document_class("sn-jnl", (SN,))
+    num = cls.references(["pdflatex", "sn-mathphys-num"])
+    assert num.bibstyle == "sn-mathphys-num" and num.natbib_options == ["numbers", "sort&compress"]
+    ay = cls.references(["sn-mathphys-ay"])
+    assert ay.bibstyle == "sn-mathphys-ay" and ay.natbib_options == ["authoryear"]
+    assert cls.references(["sn-basic", "Numbered"]).natbib_options == ["numbers", "sort&compress"]
+    nb = texdefs.natbib(tuple(ay.natbib_options), tuple(ay.citestyle))
+    assert (nb.get("NAT@open"), nb.get("NAT@sep"), nb.get("NAT@aysep"), nb.numbers) == ("(", ";", "", False)
+
+
+def test_class_names_and_theorem_styles():
+    cls = texdefs.document_class("sn-jnl", (SN,))
+    assert cls.name("refname") == "References" and cls.name("figurename") == "Fig."
+    one = texdefs.theorem_style("thmstyleone", cls.source)
+    assert (one.head_bold, one.body_italic) == (True, True)
+    remark = texdefs.theorem_style("remark")
+    assert (remark.head_bold, remark.head_italic, remark.body_italic) == (False, True, False)
+
+
+def test_cleveref_defaults_from_package():
+    cref = texdefs.cleveref()
+    assert cref.name("figure", "Cref", False) == "Figure" and cref.name("figure", "cref", True) == "figs."
+    assert "equation" in cref.parens
 
 
 # ---------------------------------------------------------------------- macros
@@ -185,7 +197,7 @@ def test_theorem_counters_shared():
 
 def test_theorem_numbered_within_section():
     envs = parse_theorems(r"\theoremstyle{thmstylethree}\newtheorem{defn}{Definition}[section]")
-    assert envs["defn"].style == "definition" and envs["defn"].within == 1
+    assert envs["defn"].style == "thmstylethree" and envs["defn"].within == 1
     _, reg = walk(r"\section{A}\begin{defn}x\end{defn}\section{B}\begin{defn}\label{d}y\end{defn}"
                   r"\begin{defn}z\end{defn}", envs)
     assert [t.head for t in reg.theorems] == ["Definition 1.1", "Definition 2.1", "Definition 2.2"]
@@ -201,14 +213,13 @@ def test_ref_variants():
 
 
 # ---------------------------------------------------------------- siunitx etc.
-def test_siunitx_text_and_math():
-    assert format_unit(r"\metre\squared\per\second", False) == "m\\textsuperscript{2} s\\textsuperscript{−1}"
-    assert format_unit(r"\kilo\gram", True) == r"\mathrm{kg}"
-    assert format_number("57655", False) == "57 655"
-    assert format_number("1.0e-16", False) == "1.0 × 10\\textsuperscript{−16}"
-    out = rewrite_packages(r"\qty{9.4 \pm 0.6}{\giga\pascal}, \qtyrange{1}{2}{\kelvin}, $x=\SI{3}{\metre}$")
-    assert out == "9.4 ± 0.6 GPa, 1 K to 2 K, $x=3\\,\\mathrm{m}$"
-    assert rewrite_packages(r"\qtylist{0;5;10}{\minute}") == "0 min, 5 min and 10 min"
+def test_siunitx_syntax_rewrites():
+    """Only syntax pandoc lacks is rewritten; the phrases come from siunitx.sty."""
+    assert rewrite_unit(r"\metre\squared\per\second") == r"\metre\squared\second\tothe{-1}"
+    assert group_digits("57655") == r"57\,655"
+    out = rewrite_packages(r"\qtyrange{1}{2}{\kelvin}, $x=\SI{3}{\metre}$")
+    assert out == r"\qty{1}{\kelvin} to \qty{2}{\kelvin}, $x=\qty{3}{\metre}$"
+    assert rewrite_packages(r"\qtylist{0;5;10}{\minute}") == r"\qty{0}{\minute}, \qty{5}{\minute} and \qty{10}{\minute}"
 
 
 def test_mhchem():
@@ -217,8 +228,11 @@ def test_mhchem():
     assert rewrite_packages(r"\ce{H2O}") == r"$\mathrm{H}_{2}\mathrm{O}$"
 
 
-def test_textual_citations_from_bib():
-    bib = read_bib_authors([ROOT / "examples/reference-manuscript/references.bib"])
-    assert bib["roe2021"] == (["Roe", "Poe", "Moe"], "2021")
-    assert author_text(bib["doe2020"][0]) == "Doe and Roe"
-    assert rewrite_textual_citations(r"\citet{roe2021}", bib) == r"Roe et al.~\cite{roe2021}"
+def test_bibtex_runs_the_style_and_labels_come_from_the_bbl():
+    keys = cited_keys(r"\citet{roe2021} \citep{doe2020} \nocite{poe2019}")
+    assert keys == ["roe2021", "doe2020", "poe2019"]
+    bbl = run_bibtex(keys, "unsrtnat", [ROOT / "examples/reference-manuscript/references.bib"], ())
+    bib = parse_thebibliography(bbl)
+    assert [k for k, _ in bib.items] == keys
+    assert bib.labels["roe2021"] == ("Roe et~al.", "2021")
+    assert bib.labels["doe2020"] == ("Doe and Roe", "2020")

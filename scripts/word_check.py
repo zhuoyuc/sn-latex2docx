@@ -3,9 +3,10 @@
 * checks that Word opens the file without repair,
 * compares every field's cached result with the value Word computes after
   updating all fields (SEQ numbering, REF cross-references),
-* exports a PDF and, optionally, PNG page images for visual review.
+* on request, renders the pages as PNG images (``--png``) or a PDF (``--pdf``) for
+  visual review; the .docx itself only ever embeds PNG/JPEG images.
 
-Usage:  uv run --extra word python scripts/word_check.py output/x.docx [--png DIR]
+Usage:  uv run --extra word python scripts/word_check.py output/x.docx [--png DIR] [--pdf FILE]
 """
 
 from __future__ import annotations
@@ -49,30 +50,31 @@ def check(docx: Path, pdf: Path | None, png_dir: Path | None, dpi: int = 80) -> 
             report["tables"] = doc.Tables.Count
             report["inline_shapes"] = doc.InlineShapes.Count
             report["equations"] = doc.OMaths.Count
-            if pdf:
-                doc.ExportAsFixedFormat(str(pdf.resolve()), 17)  # wdExportFormatPDF
+            # page images go through a PDF export (Word has no PNG export); it is kept only if asked for
+            render = pdf or (Path(tmp) / "pages.pdf" if png_dir else None)
+            if render:
+                doc.ExportAsFixedFormat(str(render.resolve()), 17)  # wdExportFormatPDF
             doc.Close(SaveChanges=False)
+            if render and png_dir:
+                import pymupdf
+
+                png_dir.mkdir(parents=True, exist_ok=True)
+                with pymupdf.open(render) as d:
+                    for i, page in enumerate(d, 1):
+                        page.get_pixmap(dpi=dpi).save(png_dir / f"page-{i:02d}.png")
     finally:
         word.Quit()
-    if pdf and png_dir:
-        import pymupdf
-
-        png_dir.mkdir(parents=True, exist_ok=True)
-        with pymupdf.open(pdf) as d:
-            for i, page in enumerate(d, 1):
-                page.get_pixmap(dpi=dpi).save(png_dir / f"page-{i:02d}.png")
     return report
 
 
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("docx", type=Path)
-    ap.add_argument("--pdf", type=Path, help="PDF output (default: next to the docx)")
+    ap.add_argument("--pdf", type=Path, help="also save Word's PDF rendering here")
     ap.add_argument("--png", type=Path, help="directory for PNG page renders")
     ap.add_argument("--dpi", type=int, default=80)
     args = ap.parse_args()
-    pdf = args.pdf or args.docx.with_suffix(".pdf")
-    rep = check(args.docx.resolve(), pdf, args.png, args.dpi)
+    rep = check(args.docx.resolve(), args.pdf, args.png, args.dpi)
     print(json.dumps(rep, indent=2, ensure_ascii=False))
     return 1 if rep["mismatches"] or rep["errors"] else 0
 

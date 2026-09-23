@@ -26,7 +26,7 @@ from ..model import (
     TheoremSpec,
     marker,
 )
-from .extras import join_list
+from . import texdefs
 from .scan import (
     VERBATIM_ENVS,
     find_commands,
@@ -81,9 +81,12 @@ def _letters(n: int) -> str:
 
 
 class Transformer:
-    def __init__(self, registry: Registry, theorems: dict[str, TheoremSpec] | None = None):
+    def __init__(self, registry: Registry, theorems: dict[str, TheoremSpec] | None = None, class_source: str = "",
+                 listing_name: str = ""):
         self.reg = registry
         self.theorems = theorems or {}  # environment name -> declaration
+        self.class_source = class_source  # document class: theorem styles, caption layout
+        self.listing_name = listing_name  # \lstlistingname
         self.theorem_counts: dict[str, int] = {}
         self.sec = [0, 0, 0]
         self.appendix = False
@@ -534,7 +537,8 @@ class Transformer:
             number = str(self.theorem_counts[spec.counter])
             if spec.within:
                 number = ".".join([*self._section_number(spec.within), number])
-        thm = Theorem(f"{spec.title} {number}".strip(), spec.style, has_note=bool(opt and opt.strip()))
+        style = texdefs.theorem_style(spec.style, self.class_source)
+        thm = Theorem(f"{spec.title} {number}".strip(), style, has_note=bool(opt and opt.strip()))
         self.reg.theorems.append(thm)
         k = len(self.reg.theorems) - 1
         saved = self._target
@@ -571,7 +575,9 @@ class Transformer:
                 anchor = ""
                 if "label" in opts:
                     anchor = self._anchor_label(opts["label"].strip("{}"), "listing", str(self.listing))
-                head = f"\n\n\\textbf{{Listing {self.listing}:}} {anchor}{cap}\n\n"
+                label = f"{self.listing_name} {self.listing}".strip()
+                sep = texdefs.caption_separator(self.class_source)
+                head = f"\n\n\\textbf{{{label}{sep.rstrip()}}} {anchor}{cap}\n\n"
         o = "[" + ",".join(keep_opts) + "]" if keep_opts else ""
         return f"{head}\\begin{{lstlisting}}{o}{code}\\end{{lstlisting}}"
 
@@ -790,89 +796,71 @@ _TABLE_BODY_COMMANDS = {
 
 
 # ---------------------------------------------------------------- algorithms
-_ALG_START = {
-    "State": ("", 0, 0, True), "STATE": ("", 0, 0, True),
-    "Statex": ("", 0, 0, False),
-    "If": ("if", 0, 1, True), "IF": ("if", 0, 1, True),
-    "ElsIf": ("else if", -1, 1, True), "ELSIF": ("else if", -1, 1, True),
-    "Else": ("else", -1, 1, True), "ELSE": ("else", -1, 1, True),
-    "EndIf": ("end if", -1, 0, True), "ENDIF": ("end if", -1, 0, True),
-    "For": ("for", 0, 1, True), "FOR": ("for", 0, 1, True),
-    "ForAll": ("for all", 0, 1, True), "FORALL": ("for all", 0, 1, True),
-    "EndFor": ("end for", -1, 0, True), "ENDFOR": ("end for", -1, 0, True),
-    "While": ("while", 0, 1, True), "WHILE": ("while", 0, 1, True),
-    "EndWhile": ("end while", -1, 0, True), "ENDWHILE": ("end while", -1, 0, True),
-    "Repeat": ("repeat", 0, 1, True), "REPEAT": ("repeat", 0, 1, True),
-    "Until": ("until", -1, 0, True), "UNTIL": ("until", -1, 0, True),
-    "Loop": ("loop", 0, 1, True), "LOOP": ("loop", 0, 1, True),
-    "EndLoop": ("end loop", -1, 0, True), "ENDLOOP": ("end loop", -1, 0, True),
-    "Function": ("function", 0, 1, True), "EndFunction": ("end function", -1, 0, True),
-    "Procedure": ("procedure", 0, 1, True), "EndProcedure": ("end procedure", -1, 0, True),
-    "Require": ("Require:", 0, 0, False), "REQUIRE": ("Require:", 0, 0, False),
-    "Ensure": ("Ensure:", 0, 0, False), "ENSURE": ("Ensure:", 0, 0, False),
-    "Input": ("Input:", 0, 0, False), "Output": ("Output:", 0, 0, False),
-    "RETURN": ("return", 0, 0, True), "PRINT": ("print", 0, 0, True),
-}
-_ALG_RE = re.compile(r"\\(" + "|".join(sorted(_ALG_START, key=len, reverse=True)) + r")(?![A-Za-z])")
+def _ifthenelse(args: list[str | None]) -> str:
+    """``\\ifthenelse{\\equal{a}{b}}{yes}{no}`` (the only test algpseudocode uses)."""
+    cond = args[0] or ""
+    m = re.fullmatch(r"\s*\\equal\s*", cond[: cond.find("{")] if "{" in cond else cond)
+    tested, _ = parse_command_args(cond, cond.find("{"), "mm") if m else ([None, None], 0)
+    same = tested[0] is not None and (tested[0] or "").strip() == (tested[1] or "").strip()
+    return (args[1] if same else args[2]) or ""
 
 
-def _const(text: str):
-    return "", lambda a: text
+def _alg_expand(text: str, grammar: texdefs.AlgGrammar) -> str:
+    """Expand algorithmicx's keyword and helper macros into LaTeX pandoc renders."""
+    handlers = {"ifthenelse": ("mmm", _ifthenelse), "hfill": ("", lambda a: "\\quad ")}
+    for name, (nargs, body) in grammar.inline.items():
+        if nargs == 0 and re.fullmatch(r"\\[A-Za-z@]+", body.strip()):
+            continue  # aliases are resolved before parsing
+        handlers[name] = ("m" * nargs, lambda a, body=body: re.sub(r"#(\d)", lambda m: a[int(m.group(1)) - 1] or "", body))
+    for _ in range(10):
+        before = text
+        text = replace_commands(_alg_aliases(text, grammar), handlers)
+        if text == before:
+            break
+    return text
 
 
-_COMMENT = ("m", lambda a: "\u2003\u25b7 " + (a[0] or ""))
-_ALG_INLINE = {
-    **{name: _const(r"\textbf{%s}" % name.lower()) for name in ("Return", "RETURN", "And", "AND", "Or", "OR", "Not", "NOT")},
-    **{name: _const(r"\textsc{%s}" % name.lower()) for name in ("True", "TRUE", "False", "FALSE")},
-    "Call": ("mm", lambda a: "\\textsc{%s}(%s)" % (a[0] or "", a[1] or "")),
-    "Comment": _COMMENT,
-    "COMMENT": _COMMENT,
-}
-
-
-def _alg_inline(text: str) -> str:
-    return replace_commands(text, _ALG_INLINE)
+def _alg_aliases(src: str, grammar: texdefs.AlgGrammar) -> str:
+    for name, (nargs, body) in grammar.inline.items():
+        if nargs == 0 and re.fullmatch(r"\\[A-Za-z@]+", body.strip()):
+            src = re.sub(r"\\" + re.escape(name) + r"(?![A-Za-z@])", lambda m, b=body.strip(): b, src)
+    return src
 
 
 def parse_algorithmic(src: str, numbered_every: int) -> list[tuple[int, int, str, list[str]]]:
-    """Return (indent, line number or 0, LaTeX text, labels) for each algorithm line."""
+    """Return (indent, line number or 0, LaTeX text, labels) for each algorithm line.
+
+    Commands, their arguments, block structure and printed keywords are those
+    algorithmicx and algpseudocode (with algcompatible's upper-case forms) define.
+    """
+    grammar = texdefs.algorithmic()
+    src = _alg_aliases(src, grammar)
+    names = sorted(grammar.commands, key=len, reverse=True)
+    pattern = re.compile(r"\\(" + "|".join(map(re.escape, names)) + r")(?![A-Za-z@])")
     lines: list[tuple[int, int, str, list[str]]] = []
     indent = 0
     lineno = 0
-    matches = [m for m in _ALG_RE.finditer(src) if not is_escaped(src, m.start())]
+    matches = [m for m in pattern.finditer(src) if not is_escaped(src, m.start())]
     for idx, m in enumerate(matches):
-        name = m.group(1)
-        word, before, after, counts = _ALG_START[name]
+        cmd = grammar.commands[m.group(1)]
         seg_end = matches[idx + 1].start() if idx + 1 < len(matches) else len(src)
-        rest = src[m.end() : seg_end]
-        text = ""
-        if name in ("Function", "Procedure"):
-            args, i = parse_command_args(rest, 0, "mm")
-            text = f"\\textbf{{{word}}} \\textsc{{{args[0]}}}({args[1]})"
-            rest = rest[i:]
-        elif name in ("If", "IF", "ElsIf", "ELSIF", "While", "WHILE", "For", "FOR", "ForAll", "FORALL", "Until", "UNTIL"):
-            args, i = parse_command_args(rest, 0, "m")
-            cond = args[0] or ""
-            tail = {"if": "then", "else if": "then", "while": "do", "for": "do", "for all": "do"}.get(word)
-            text = f"\\textbf{{{word}}} {cond}" + (f" \\textbf{{{tail}}}" if tail else "")
-            rest = rest[i:]
-        elif name in ("Else", "ELSE"):
-            opt, i = read_optional(rest, 0)
-            text = "\\textbf{else}" + (f"\u2003\u25b7 {opt}" if opt else "")
-            rest = rest[i:]
-        elif word:
-            text = f"\\textbf{{{word}}}"
+        spec = ("o" + "m" * (cmd.nargs - 1)) if cmd.default is not None and cmd.nargs else "m" * cmd.nargs
+        args, i = parse_command_args(src[: seg_end], m.end(), spec)
+        if cmd.default is not None and cmd.nargs and args[0] is None:
+            args[0] = cmd.default
+        head = re.sub(r"#(\d)", lambda a: args[int(a.group(1)) - 1] or "", cmd.template)
         labels: list[str] = []
-        rest = _pop_labels(rest, labels)
-        text = (text + " " + rest.strip()).strip()
-        text = _alg_inline(text)
-        indent = max(0, indent + before)
+        rest = _pop_labels(src[i:seg_end], labels)
+        text = _alg_expand((head + " " + rest.strip()).strip(), grammar).strip()
+        if cmd.role in ("end", "continue"):
+            indent = max(0, indent - 1)
         number = 0
-        if counts and numbered_every:
+        if cmd.role != "item" and numbered_every:
             lineno += 1
             number = lineno if lineno % numbered_every == 0 else 0
         lines.append((indent, number, text, labels))
-        indent = max(0, indent + after)  # else/elsif are dedented for their own line only
+        if cmd.role in ("start", "continue"):
+            indent += 1
     return lines
 
 
@@ -904,7 +892,7 @@ def replace_refs(text: str, reg: Registry, math: bool = False) -> str:
             args, end = parse_command_args(text, m.end(), "mm")
             a = marker("REF", reg.add_ref((args[0] or "").strip(), cmd[:4] + "+"))
             b = marker("REF", reg.add_ref((args[1] or "").strip(), "bare"))
-            joined = f"{a}\u2013{b}"
+            joined = a + reg.conjunctions.get("range", "") + b
             out.append(text[pos : m.start()] + (f"\\text{{{joined}}}" if math else joined))
             pos = end
             continue
@@ -922,8 +910,17 @@ def replace_refs(text: str, reg: Registry, math: bool = False) -> str:
             else:
                 variant = base
             pieces.append(marker("REF", reg.add_ref(key, variant)))
-        joined = join_list(pieces)
+        joined = _join(pieces, reg.conjunctions) if base in ("cref", "Cref") else ", ".join(pieces)
         out.append(f"\\text{{{joined}}}" if math else joined)
         pos = end
     out.append(text[pos:])
     return "".join(out)
+
+
+def _join(items: list[str], conj: dict[str, str]) -> str:
+    """Join a cleveref list with the package's conjunctions (``\\crefpairconjunction`` ...)."""
+    if len(items) < 2:
+        return "".join(items)
+    if len(items) == 2:
+        return items[0] + conj.get("pair", "") + items[1]
+    return conj.get("middle", "").join(items[:-1]) + conj.get("last", "") + items[-1]

@@ -15,6 +15,7 @@ from sn2docx.docx.verify import inspect
 from sn2docx.pipeline import convert, default_template
 
 ROOT = Path(__file__).resolve().parents[1]
+SN = (ROOT / "templates/springer-nature",)  # sn-jnl.cls and its .bst files
 pytestmark = pytest.mark.skipif(shutil.which("pandoc") is None, reason="pandoc not installed")
 
 
@@ -25,7 +26,8 @@ def out_dir(tmp_path_factory) -> Path:
 
 @pytest.fixture(scope="session")
 def reference(out_dir):
-    return convert(ROOT / "examples/reference-manuscript/manuscript.tex", out_dir / "reference.docx", date="August 23, 2026")
+    return convert(ROOT / "examples/reference-manuscript/manuscript.tex", out_dir / "reference.docx", date="August 23, 2026",
+                   tex_dirs=SN)
 
 
 @pytest.fixture(scope="session")
@@ -35,7 +37,7 @@ def sample(out_dir):
 
 @pytest.fixture(scope="session")
 def edge(out_dir):
-    return convert(ROOT / "tests/fixtures/edge/edge.tex", out_dir / "edge.docx")
+    return convert(ROOT / "tests/fixtures/edge/edge.tex", out_dir / "edge.docx", tex_dirs=SN)
 
 
 def _xml(path: Path, part: str = "word/document.xml"):
@@ -45,8 +47,8 @@ def _xml(path: Path, part: str = "word/document.xml"):
 
 def _texts(path: Path) -> list[str]:
     body = _xml(path).find(q("w:body"))
-    # "~" becomes a no-break space; compare with ordinary spaces
-    return [text_of(p).replace("\u00a0", " ") for p in body.iter(q("w:p"))]
+    # "~" and "\\," become no-break and thin spaces; compare with ordinary spaces
+    return [" ".join(text_of(p).split()) for p in body.iter(q("w:p"))]
 
 
 # ------------------------------------------------------------ structural checks
@@ -55,6 +57,27 @@ def test_documents_are_structurally_valid(name, request):
     res = request.getfixturevalue(name)
     summary = inspect(res.output)
     assert summary.problems == []
+
+
+@pytest.mark.parametrize("name", ["reference", "sample", "edge"])
+def test_embedded_images_are_png_or_jpeg(name, request):
+    """PDF, EPS and SVG figures are converted; Word only receives raster images."""
+    with zipfile.ZipFile(request.getfixturevalue(name).output) as z:
+        media = [n for n in z.namelist() if n.startswith("word/media/")]
+        types = etree.fromstring(z.read("[Content_Types].xml"))
+    assert media
+    assert {Path(n).suffix.lower() for n in media} <= {".png", ".jpeg", ".jpg"}
+    defaults = {d.get("Extension"): d.get("ContentType") for d in types if d.get("Extension")}
+    assert all(defaults[Path(n).suffix[1:].lower()] in ("image/png", "image/jpeg") for n in media)
+
+
+def test_no_hardcoded_symbols_in_source():
+    """Symbols and words come from TeX sources, the template or libraries, not from literals."""
+    import subprocess
+    import sys
+
+    res = subprocess.run([sys.executable, str(ROOT / "scripts/find_hardcoded.py"), str(ROOT / "src")], capture_output=True, text=True)
+    assert res.returncode == 0, res.stdout
 
 
 def test_python_docx_can_open_output(reference, sample):
@@ -85,7 +108,7 @@ def test_reference_bibliography_format(reference):
     refs = [t for t in texts if re.match(r"\[\d\] ", t)]
     assert refs[0] == (
         "[1] Jane Doe and Richard Roe. A placeholder study of diffusion in layered media. "
-        "Journal of Placeholder Results, 12 (3): 101–118, 2020. doi: https://doi.org/10.1000/placeholder.2020.101."
+        "Journal of Placeholder Results, 12 (3): 101–118, 2020. doi: 10.1000/placeholder.2020.101."
     )
     assert refs[2] == "[3] Ada Poe. Methods for Documents That Do Not Exist. Fictional Press, Nowhere, 2019."
     assert len(refs) == 5
@@ -96,9 +119,9 @@ def test_reference_bibliography_format(reference):
 def test_reference_cross_references_and_units(reference):
     texts = " ".join(_texts(reference.output))
     assert "Section 2 capitalises the type name, section 3 does not, and (1) prints" in texts
-    assert "Combining Eqs. (2)–(3)" in texts
+    assert "Combining Eqs. (2) to (3)" in texts  # cleveref's \crefrangeconjunction
     assert "is given in appendix A" in texts
-    assert "8.27 MPa" in texts and "57 655" in texts and "10 min" in texts
+    assert "8.27 MPa" in texts and "57 655" in texts and "10 min" in texts
     assert "Figure 1: A two-panel figure." in texts
 
 
@@ -166,7 +189,8 @@ def test_edge_cases(edge):
     joined = " ".join(_texts(edge.output))
     assert "See Lemma 1, Corollary 2, equation (⋆), Fig. 1 and panel 1b." in joined
     assert "An undefined reference ??." in joined
-    assert "(Knuth, 1984; Lamport, 1994)" in joined and "Lamport (1994)" in joined
+    # sn-mathphys-ay: natbib author-year with the class's \setcitestyle{aysep={}}
+    assert "(Knuth 1984; Lamport 1994)" in joined and "Lamport (1994)" in joined
     assert "Line 2 of Algorithm 1" in joined
     assert "undefined reference: nope" in edge.warnings
     assert any("image not found" in w for w in edge.warnings)

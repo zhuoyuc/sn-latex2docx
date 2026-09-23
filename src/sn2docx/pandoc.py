@@ -44,7 +44,7 @@ def resource_path(name: str) -> Path:
     return Path(str(resources.files("sn2docx") / "resources" / name))
 
 
-def run_pandoc(tex: str, conv: Conversion, reference_doc: Path, out: Path, workdir: Path, csl: Path | None = None) -> None:
+def run_pandoc(tex: str, conv: Conversion, reference_doc: Path, out: Path, workdir: Path) -> None:
     exe = pandoc_executable()
     if pandoc_version(exe) < MIN_PANDOC:
         raise RuntimeError("pandoc >= 3.0 is required")
@@ -57,11 +57,6 @@ def run_pandoc(tex: str, conv: Conversion, reference_doc: Path, out: Path, workd
         "--reference-doc", str(reference_doc.resolve()),
         "--resource-path", str(conv.source_dir.resolve()),
     ]
-    if conv.bibliography and not conv.manual_bibliography:
-        style = csl or resource_path(f"csl/{conv.citation_mode}.csl")
-        cmd += ["--citeproc", "--csl", str(Path(style).resolve()), "-M", "link-citations=true"]
-        for b in conv.bibliography:
-            cmd += ["--bibliography", str(b.resolve())]
     log.debug("running %s", " ".join(cmd))
     res = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", cwd=workdir)
     for line in (res.stderr or "").splitlines():

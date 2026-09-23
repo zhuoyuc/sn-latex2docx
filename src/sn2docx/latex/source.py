@@ -208,6 +208,7 @@ def expand_macros(text: str, table: MacroTable, max_passes: int = 10) -> str:
 class Manuscript:
     path: Path
     documentclass_options: list[str]
+    documentclass: str
     preamble: str
     body: str
 
@@ -222,7 +223,9 @@ def load_manuscript(path: Path) -> Manuscript:
     end = re.search(r"\\end\s*\{document\}", raw[m.end() :])
     body = raw[m.end() : m.end() + end.start()] if end else raw[m.end() :]
     opts: list[str] = []
+    cls = ""
     for _, _, args in find_commands(preamble, "documentclass", spec="om"):
         opts = [o.strip() for o in (args[0] or "").split(",") if o.strip()]
+        cls = (args[1] or "").strip()
         break
-    return Manuscript(path, opts, preamble, body)
+    return Manuscript(path, opts, cls, preamble, body)

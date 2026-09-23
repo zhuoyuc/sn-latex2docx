@@ -12,6 +12,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 MARKER_RE = re.compile(r"@@([A-Z]+)([0-9:]*)@@")
 
@@ -43,7 +44,7 @@ class FrontMatter:
     authors: list[Author] = field(default_factory=list)
     affiliations: list[Affiliation] = field(default_factory=list)
     abstract: str = ""
-    keywords: list[str] = field(default_factory=list)
+    keywords: str = ""  # LaTeX, as written
     date: str | None = None
 
 
@@ -65,6 +66,7 @@ class Heading:
     appendix: bool
     number: str
     bookmark: str | None = None
+    role: str = ""  # "references": the bibliography heading, text supplied by the docx stage
 
 
 @dataclass
@@ -118,7 +120,7 @@ class TheoremSpec:
 
     title: str  # e.g. "Theorem"
     counter: str | None  # counter name (shared counters point to the same name); None = unnumbered
-    style: str = "plain"  # plain | definition | remark | roman-head (sn-jnl thmstyletwo)
+    style: str = "plain"  # \\theoremstyle name, resolved from the class or amsthm
     within: int = 0  # 1 = numbered within section ("2.1"), 2 = within subsection, 0 = global
 
 
@@ -127,7 +129,7 @@ class Theorem:
     """One theorem-like environment instance; the head is written by the post-processor."""
 
     head: str  # "Theorem 2.1"
-    style: str
+    style: Any  # texdefs.ThmStyle
     has_note: bool = False  # optional argument, e.g. [Pythagoras]
 
 
@@ -144,11 +146,13 @@ class Registry:
     refs: list[tuple[str, str]] = field(default_factory=list)
     # point anchors (theorems, algorithm lines, ...): index -> bookmark
     anchors: list[str] = field(default_factory=list)
-    # manual bibliography (thebibliography): citation index -> (command, keys, prenote, postnote)
+    # citations: index -> (command, keys, prenote, postnote)
     cites: list[tuple[str, list[str], str | None, str | None]] = field(default_factory=list)
     bibitems: list[str] = field(default_factory=list)  # keys in order
-    bib_labels: dict[str, str] = field(default_factory=dict)  # key -> \bibitem optional label
+    bib_labels: dict[str, tuple[str, str]] = field(default_factory=dict)  # key -> (authors, year) LaTeX
     bookmarks: set[str] = field(default_factory=set)  # lower-cased names in use
+    # cleveref list conjunctions (LaTeX): pair, middle, last, range
+    conjunctions: dict[str, str] = field(default_factory=dict)
 
     def bookmark_for(self, label: str) -> str:
         """Word-safe, unique bookmark name derived from a LaTeX label."""
@@ -182,9 +186,12 @@ class Conversion:
     registry: Registry
     source_dir: Path
     graphics_paths: list[Path]
-    bibliography: list[Path]
-    citation_mode: str  # "numeric" | "author-year"
-    manual_bibliography: bool = False
+    natbib: Any = None  # texdefs.Natbib: citation punctuation
+    bibstyle: str | None = None  # the .bst BibTeX formatted the references with
     equal_notes: list[str] = field(default_factory=list)  # distinct \equalcont texts
-    # \crefname / \Crefname: cleveref type -> {"cref": (singular, plural), "Cref": (...)}
+    # cleveref names (package defaults + \crefname/\Crefname): type -> {"cref": (sg, pl), "Cref": (sg, pl)}
     cref_names: dict[str, dict[str, tuple[str, str]]] = field(default_factory=dict)
+    cref_parens: set[str] = field(default_factory=set)  # types cleveref prints as "(1)"
+    equal_mark: str | None = None  # LaTeX the document class appends for \equalcont
+    # names the class and packages define (refname, figurename, ..., contributing, emailsep), plain text
+    names: dict[str, str] = field(default_factory=dict)

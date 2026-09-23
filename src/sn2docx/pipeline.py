@@ -20,7 +20,7 @@ log = logging.getLogger(__name__)
 class Result:
     output: Path
     warnings: list[str] = field(default_factory=list)
-    citation_mode: str = "numeric"
+    bibstyle: str | None = None  # BibTeX style the references were formatted with
 
 
 def default_template() -> Path:
@@ -33,8 +33,8 @@ def convert(
     template: Path | None = None,
     figure_width: float | None = 3.25,
     date: str | None = None,
-    csl: Path | None = None,
     keep_intermediate: Path | None = None,
+    tex_dirs: tuple[Path, ...] = (),
 ) -> Result:
     """Convert ``source`` (an sn-jnl .tex file) and return the output path plus warnings."""
     source = Path(source).resolve()
@@ -51,13 +51,13 @@ def convert(
     root = logging.getLogger("sn2docx")
     root.addHandler(handler)
     try:
-        pre = preprocess(source)
+        pre = preprocess(source, tuple(tex_dirs))
         with tempfile.TemporaryDirectory(prefix="sn2docx-") as tmp:
             work = Path(tmp)
             tpl = Package.open(template)
             ref = make_reference_doc(tpl, work / "reference.docx")
             raw = work / "pandoc.docx"
-            run_pandoc(pre.pandoc_tex, pre.conversion, ref, raw, work, csl=csl)
+            run_pandoc(pre.pandoc_tex, pre.conversion, ref, raw, work)
             if keep_intermediate:
                 keep_intermediate.mkdir(parents=True, exist_ok=True)
                 shutil.copy(work / "pandoc-input.tex", keep_intermediate / "pandoc-input.tex")
@@ -66,4 +66,4 @@ def convert(
             postprocess(raw, output, pre.conversion, tpl, opts)
     finally:
         root.removeHandler(handler)
-    return Result(output, list(dict.fromkeys(warnings)), pre.conversion.citation_mode)
+    return Result(output, list(dict.fromkeys(warnings)), pre.conversion.bibstyle)

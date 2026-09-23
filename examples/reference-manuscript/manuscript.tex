@@ -5,7 +5,7 @@
 % template's structure: numbered/unnumbered equations with live SEQ fields,
 % REF cross-references, sub-figures, a PDF figure, booktabs tables, roman lists,
 % two lettered appendices and numbered references.
-\documentclass[pdflatex,sn-mathphys-num]{sn-jnl}
+\documentclass[pdflatex]{sn-jnl}
 
 \usepackage{graphicx}
 \usepackage{amsmath,amssymb}
@@ -15,7 +15,11 @@
 \usepackage[version=4]{mhchem}
 \usepackage{enumitem}
 \usepackage[title]{appendix}
+\usepackage[numbers,sort&compress]{natbib}
 \usepackage{cleveref}
+\crefname{equation}{Eq.}{Eqs.}
+\crefname{figure}{Figure}{Figures}
+\crefname{table}{Table}{Tables}
 
 \graphicspath{{figures/}}
 \newcommand{\order}{\eta}
@@ -264,6 +268,7 @@ and the domain \qtyproduct{10 x 1}{\micro\metre}. Robust statistics follow
 
 \end{appendices}
 
+\bibliographystyle{unsrtnat}
 \bibliography{references}
 
 \end{document}

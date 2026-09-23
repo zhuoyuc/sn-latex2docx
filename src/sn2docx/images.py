@@ -114,7 +114,21 @@ def load_image(path: Path, options: str | None = None) -> RasterImage:
     return _raster_from_bytes(path.read_bytes(), keep_jpeg=True)
 
 
-UNIT_IN = {"in": 1.0, "cm": 1 / 2.54, "mm": 1 / 25.4, "pt": 1 / 72.27, "bp": 1 / 72.0, "pc": 12 / 72.27}
+# TeX's unit keywords and the names pint gives the same units (the sizes come from pint)
+TEX_UNITS = {"in": "inch", "cm": "centimeter", "mm": "millimeter", "pt": "tex_point", "bp": "big_point",
+              "pc": "tex_pica", "dd": "didot", "cc": "cicero", "sp": "scaled_point"}
+
+
+@cache
+def _units():
+    import pint
+
+    return pint.UnitRegistry()
+
+
+def length_in(value: float, tex_unit: str) -> float:
+    """A TeX length in inches."""
+    return _units().Quantity(value, TEX_UNITS[tex_unit]).to("inch").magnitude
 
 
 def requested_width(options: str | None, text_width_in: float) -> float | None:
@@ -125,7 +139,7 @@ def requested_width(options: str | None, text_width_in: float) -> float | None:
     if m:
         f = float(m.group(1)) if m.group(1) else 1.0
         return f * text_width_in
-    m = re.search(r"(?<![a-z])width\s*=\s*([0-9.]+)\s*(in|cm|mm|pt|bp|pc)", options)
+    m = re.search(r"(?<![a-z])width\s*=\s*([0-9.]+)\s*(" + "|".join(TEX_UNITS) + ")", options)
     if m:
-        return float(m.group(1)) * UNIT_IN[m.group(2)]
+        return length_in(float(m.group(1)), m.group(2))
     return None  # scale= and height= keep the default width

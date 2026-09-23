@@ -428,7 +428,14 @@ def _latex2text():
     return LatexNodes2Text(latex_context=db, math_mode="text")
 
 
-def latex_to_plain(s: str) -> str:
-    """LaTeX to plain text (document properties, equation tags, citation labels), via pylatexenc."""
+def latex_to_plain(s: str, strip: bool = True) -> str:
+    """LaTeX to plain text (document properties, equation tags, citation labels), via pylatexenc.
+
+    Runs of whitespace (including the no-break spaces ``~`` becomes) collapse to one
+    space; with ``strip=False`` a leading or trailing space is kept (separators such as ``;\\ ``).
+    """
     text = _latex2text().latex_to_text(s)
-    return re.sub(r"\s+", " ", text.replace(" ", " ")).strip()
+    words = text.split()
+    if strip or not words:
+        return " ".join(words) if words or strip else (" " if text else "")
+    return (" " if text[:1].isspace() else "") + " ".join(words) + (" " if text[-1:].isspace() else "")
